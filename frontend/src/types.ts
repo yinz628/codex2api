@@ -57,6 +57,58 @@ export interface HealthResponse {
   total: number
 }
 
+export interface OpsOverviewResponse {
+  updated_at: ISODateString
+  uptime_seconds: number
+  cpu: {
+    percent: number
+    cores: number
+  }
+  memory: {
+    percent: number
+    used_bytes: number
+    total_bytes: number
+  }
+  runtime: {
+    goroutines: number
+    available_accounts: number
+    total_accounts: number
+  }
+  requests: {
+    active: number
+    total: number
+  }
+  postgres: {
+    healthy: boolean
+    open: number
+    in_use: number
+    idle: number
+    max_open: number
+    wait_count: number
+    usage_percent: number
+  }
+  redis: {
+    healthy: boolean
+    total_conns: number
+    idle_conns: number
+    stale_conns: number
+    pool_size: number
+    usage_percent: number
+  }
+  traffic: {
+    qps: number
+    qps_peak: number
+    tps: number
+    tps_peak: number
+    rpm: number
+    tpm: number
+    error_rate: number
+    today_requests: number
+    today_tokens: number
+    rpm_limit: number
+  }
+}
+
 export interface SystemSettings {
   max_concurrency: number
   global_rpm: number

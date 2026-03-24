@@ -7,6 +7,7 @@ import type {
   CreateAPIKeyResponse,
   HealthResponse,
   MessageResponse,
+  OpsOverviewResponse,
   StatsResponse,
   SystemSettings,
   UsageLogsResponse,
@@ -61,6 +62,7 @@ export const api = {
   refreshAccount: (id: number) =>
     request<MessageResponse>(`/accounts/${id}/refresh`, { method: 'POST' }),
   getHealth: () => request<HealthResponse>('/health'),
+  getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
   getUsageStats: () => request<UsageStats>('/usage/stats'),
   getUsageLogs: (limit = 50) => request<UsageLogsResponse>(`/usage/logs?limit=${limit}`),
   getAPIKeys: () => request<APIKeysResponse>('/keys'),

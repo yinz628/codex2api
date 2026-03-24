@@ -433,6 +433,14 @@ type UsageStats struct {
 	ErrorRate         float64 `json:"error_rate"`
 }
 
+// TrafficSnapshot 近实时流量快照
+type TrafficSnapshot struct {
+	QPS     float64 `json:"qps"`
+	QPSPeak float64 `json:"qps_peak"`
+	TPS     float64 `json:"tps"`
+	TPSPeak float64 `json:"tps_peak"`
+}
+
 // GetUsageStats 获取使用统计（基线 + 当前日志）
 func (db *DB) GetUsageStats(ctx context.Context) (*UsageStats, error) {
 	stats := &UsageStats{}
@@ -491,6 +499,47 @@ func (db *DB) GetUsageStats(ctx context.Context) (*UsageStats, error) {
 	return stats, nil
 }
 
+// GetTrafficSnapshot 获取近实时流量快照
+func (db *DB) GetTrafficSnapshot(ctx context.Context) (*TrafficSnapshot, error) {
+	snapshot := &TrafficSnapshot{}
+	query := `
+	WITH per_second AS (
+		SELECT
+			date_trunc('second', created_at) AS sec,
+			COUNT(*)::float8 AS req_count,
+			COALESCE(SUM(total_tokens), 0)::float8 AS token_count
+		FROM usage_logs
+		WHERE created_at >= NOW() - INTERVAL '5 minutes'
+		GROUP BY 1
+	),
+	current_window AS (
+		SELECT
+			COALESCE(SUM(req_count), 0)::float8 AS req_10s,
+			COALESCE(SUM(token_count), 0)::float8 AS tok_10s
+		FROM per_second
+		WHERE sec >= date_trunc('second', NOW() - INTERVAL '10 seconds')
+	)
+	SELECT
+		COALESCE((SELECT req_10s FROM current_window), 0) / 10.0 AS qps,
+		COALESCE(MAX(req_count), 0) AS qps_peak,
+		COALESCE((SELECT tok_10s FROM current_window), 0) / 10.0 AS tps,
+		COALESCE(MAX(token_count), 0) AS tps_peak
+	FROM per_second
+	`
+
+	err := db.conn.QueryRowContext(ctx, query).Scan(
+		&snapshot.QPS,
+		&snapshot.QPSPeak,
+		&snapshot.TPS,
+		&snapshot.TPSPeak,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return snapshot, nil
+}
+
 // ListRecentUsageLogs 获取最近的请求日志
 func (db *DB) ListRecentUsageLogs(ctx context.Context, limit int) ([]*UsageLog, error) {
 	if limit <= 0 || limit > 200 {
@@ -542,6 +591,16 @@ func (db *DB) ClearUsageLogs(ctx context.Context) error {
 	// 再清空日志
 	_, err = db.conn.ExecContext(ctx, `TRUNCATE TABLE usage_logs RESTART IDENTITY`)
 	return err
+}
+
+// Ping 检查 PostgreSQL 连通性
+func (db *DB) Ping(ctx context.Context) error {
+	return db.conn.PingContext(ctx)
+}
+
+// Stats 返回 PostgreSQL 连接池状态
+func (db *DB) Stats() sql.DBStats {
+	return db.conn.Stats()
 }
 
 // AccountRequestCount 每个账号的请求统计

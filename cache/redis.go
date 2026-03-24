@@ -36,6 +36,21 @@ func (tc *TokenCache) Close() error {
 	return tc.client.Close()
 }
 
+// Ping 检查 Redis 连通性
+func (tc *TokenCache) Ping(ctx context.Context) error {
+	return tc.client.Ping(ctx).Err()
+}
+
+// Stats 返回 Redis 连接池状态
+func (tc *TokenCache) Stats() *redis.PoolStats {
+	return tc.client.PoolStats()
+}
+
+// PoolSize 返回连接池大小配置
+func (tc *TokenCache) PoolSize() int {
+	return tc.client.Options().PoolSize
+}
+
 // ==================== Access Token 缓存 ====================
 
 func tokenKey(accountID int64) string {

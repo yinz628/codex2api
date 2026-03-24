@@ -90,7 +90,7 @@ func main() {
 	handler.RegisterRoutes(r)
 
 	// 管理后台 API
-	adminHandler := admin.NewHandler(store, db, rateLimiter)
+	adminHandler := admin.NewHandler(store, db, tc, rateLimiter)
 	adminHandler.RegisterRoutes(r)
 
 	// 管理后台前端静态文件

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
@@ -20,13 +21,23 @@ import (
 // Handler 管理后台 API 处理器
 type Handler struct {
 	store       *auth.Store
+	cache       *cache.TokenCache
 	db          *database.DB
 	rateLimiter *proxy.RateLimiter
+	cpuSampler  *cpuSampler
+	startedAt   time.Time
 }
 
 // NewHandler 创建管理后台处理器
-func NewHandler(store *auth.Store, db *database.DB, rl *proxy.RateLimiter) *Handler {
-	return &Handler{store: store, db: db, rateLimiter: rl}
+func NewHandler(store *auth.Store, db *database.DB, tc *cache.TokenCache, rl *proxy.RateLimiter) *Handler {
+	return &Handler{
+		store:       store,
+		cache:       tc,
+		db:          db,
+		rateLimiter: rl,
+		cpuSampler:  newCPUSampler(),
+		startedAt:   time.Now(),
+	}
 }
 
 // RegisterRoutes 注册管理 API 路由
@@ -48,6 +59,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/keys", h.CreateAPIKey)
 	api.DELETE("/keys/:id", h.DeleteAPIKey)
 	api.GET("/health", h.GetHealth)
+	api.GET("/ops/overview", h.GetOpsOverview)
 	api.GET("/settings", h.GetSettings)
 	api.PUT("/settings", h.UpdateSettings)
 	api.GET("/models", h.ListModels)

@@ -26,3 +26,5 @@ Thumbs.db
 # Env
 .env
 .env.local
+USAGE_WINDOW_LOGIC.md
+.claude/settings.local.json

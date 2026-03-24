@@ -51,6 +51,72 @@ type createAPIKeyResponse struct {
 	Name string `json:"name"`
 }
 
+type opsOverviewResponse struct {
+	UpdatedAt     string              `json:"updated_at"`
+	UptimeSeconds int64               `json:"uptime_seconds"`
+	CPU           opsCPUResponse      `json:"cpu"`
+	Memory        opsMemoryResponse   `json:"memory"`
+	Runtime       opsRuntimeResponse  `json:"runtime"`
+	Requests      opsRequestsResponse `json:"requests"`
+	Postgres      opsDatabaseResponse `json:"postgres"`
+	Redis         opsRedisResponse    `json:"redis"`
+	Traffic       opsTrafficResponse  `json:"traffic"`
+}
+
+type opsCPUResponse struct {
+	Percent float64 `json:"percent"`
+	Cores   int     `json:"cores"`
+}
+
+type opsMemoryResponse struct {
+	Percent    float64 `json:"percent"`
+	UsedBytes  uint64  `json:"used_bytes"`
+	TotalBytes uint64  `json:"total_bytes"`
+}
+
+type opsRuntimeResponse struct {
+	Goroutines        int `json:"goroutines"`
+	AvailableAccounts int `json:"available_accounts"`
+	TotalAccounts     int `json:"total_accounts"`
+}
+
+type opsRequestsResponse struct {
+	Active int64 `json:"active"`
+	Total  int64 `json:"total"`
+}
+
+type opsDatabaseResponse struct {
+	Healthy      bool    `json:"healthy"`
+	Open         int     `json:"open"`
+	InUse        int     `json:"in_use"`
+	Idle         int     `json:"idle"`
+	MaxOpen      int     `json:"max_open"`
+	WaitCount    int64   `json:"wait_count"`
+	UsagePercent float64 `json:"usage_percent"`
+}
+
+type opsRedisResponse struct {
+	Healthy      bool    `json:"healthy"`
+	TotalConns   uint32  `json:"total_conns"`
+	IdleConns    uint32  `json:"idle_conns"`
+	StaleConns   uint32  `json:"stale_conns"`
+	PoolSize     int     `json:"pool_size"`
+	UsagePercent float64 `json:"usage_percent"`
+}
+
+type opsTrafficResponse struct {
+	QPS           float64 `json:"qps"`
+	QPSPeak       float64 `json:"qps_peak"`
+	TPS           float64 `json:"tps"`
+	TPSPeak       float64 `json:"tps_peak"`
+	RPM           float64 `json:"rpm"`
+	TPM           float64 `json:"tpm"`
+	ErrorRate     float64 `json:"error_rate"`
+	TodayRequests int64   `json:"today_requests"`
+	TodayTokens   int64   `json:"today_tokens"`
+	RPMLimit      int     `json:"rpm_limit"`
+}
+
 func writeError(c *gin.Context, statusCode int, message string) {
 	c.JSON(statusCode, errorResponse{Error: message})
 }
