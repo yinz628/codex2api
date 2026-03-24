@@ -30,6 +30,8 @@ export default function Accounts() {
   const [showAdd, setShowAdd] = useState(false)
   const [page, setPage] = useState(1)
   const [statusFilter, setStatusFilter] = useState<'all' | 'normal' | 'rate_limited' | 'banned'>('all')
+  const [sortKey, setSortKey] = useState<'requests' | 'usage' | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
   const PAGE_SIZE = 20
   const [addForm, setAddForm] = useState<AddAccountRequest>({
     refresh_token: '',
@@ -96,8 +98,19 @@ export default function Accounts() {
     }
   })
 
-  const totalPages = Math.max(1, Math.ceil(filteredAccounts.length / PAGE_SIZE))
-  const pagedAccounts = filteredAccounts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const sortedAccounts = [...filteredAccounts].sort((a, b) => {
+    if (!sortKey) return 0
+    let diff = 0
+    if (sortKey === 'requests') {
+      diff = ((a.success_requests ?? 0) + (a.error_requests ?? 0)) - ((b.success_requests ?? 0) + (b.error_requests ?? 0))
+    } else if (sortKey === 'usage') {
+      diff = (a.usage_percent_7d ?? -1) - (b.usage_percent_7d ?? -1)
+    }
+    return sortDir === 'asc' ? diff : -diff
+  })
+
+  const totalPages = Math.max(1, Math.ceil(sortedAccounts.length / PAGE_SIZE))
+  const pagedAccounts = sortedAccounts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const allPageSelected = pagedAccounts.length > 0 && pagedAccounts.every((a) => selected.has(a.id))
 
   const toggleSelect = (id: number) => {
@@ -428,8 +441,18 @@ export default function Accounts() {
                       <TableHead className="text-[13px] font-semibold">邮箱</TableHead>
                       <TableHead className="text-[13px] font-semibold">套餐</TableHead>
                       <TableHead className="text-[13px] font-semibold">状态</TableHead>
-                      <TableHead className="text-[13px] font-semibold">请求统计</TableHead>
-                      <TableHead className="text-[13px] font-semibold">用量</TableHead>
+                      <TableHead
+                        className="text-[13px] font-semibold cursor-pointer select-none hover:text-primary transition-colors"
+                        onClick={() => { if (sortKey === 'requests') { setSortDir(d => d === 'asc' ? 'desc' : 'asc') } else { setSortKey('requests'); setSortDir('desc') }; setPage(1) }}
+                      >
+                        请求统计 {sortKey === 'requests' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                      </TableHead>
+                      <TableHead
+                        className="text-[13px] font-semibold cursor-pointer select-none hover:text-primary transition-colors"
+                        onClick={() => { if (sortKey === 'usage') { setSortDir(d => d === 'asc' ? 'desc' : 'asc') } else { setSortKey('usage'); setSortDir('desc') }; setPage(1) }}
+                      >
+                        用量 {sortKey === 'usage' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                      </TableHead>
                       <TableHead className="text-[13px] font-semibold">更新时间</TableHead>
                       <TableHead className="text-[13px] font-semibold text-right">操作</TableHead>
                     </TableRow>
