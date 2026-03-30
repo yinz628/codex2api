@@ -64,8 +64,8 @@ export default function AccountTrendChart() {
     try {
       const cfg = getRangeConfig(range)
       const now = new Date()
-      const start = toRFC3339(new Date(now.getTime() - cfg.offsetMs))
-      const end = toRFC3339(now)
+      const start = new Date(now.getTime() - cfg.offsetMs).toISOString()
+      const end = now.toISOString()
       const resp = await api.getAccountEventTrend({ start, end, bucketMinutes: cfg.bucketMinutes })
       setRawData(resp.trend ?? [])
     } catch (err) {

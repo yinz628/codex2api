@@ -104,10 +104,10 @@ func New(driver string, dsn string) (*DB, error) {
 		conn.SetMaxIdleConns(1)
 	} else {
 		// 高并发场景：大量 RT 刷新 + 前端查询 + 使用日志写入 并行
-		conn.SetMaxOpenConns(100)                  // 增加最大打开连接数以处理更高并发
-		conn.SetMaxIdleConns(50)                   // 增加空闲连接数以保持热连接
-		conn.SetConnMaxLifetime(60 * time.Minute)  // 增加连接最大生存时间
-		conn.SetConnMaxIdleTime(30 * time.Minute)  // 增加空闲连接最大闲置时间
+		conn.SetMaxOpenConns(100)                 // 增加最大打开连接数以处理更高并发
+		conn.SetMaxIdleConns(50)                  // 增加空闲连接数以保持热连接
+		conn.SetConnMaxLifetime(60 * time.Minute) // 增加连接最大生存时间
+		conn.SetConnMaxIdleTime(30 * time.Minute) // 增加空闲连接最大闲置时间
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -829,25 +829,27 @@ func (db *DB) GetUsageStats(ctx context.Context) (*UsageStats, error) {
 	now := time.Now()
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	minuteAgo := now.Add(-1 * time.Minute)
+	todayCondition := db.timeLowerBoundCondition("created_at", "$1")
+	recentCondition := db.timeLowerBoundCondition("created_at", "$2")
 
-	todayQuery := `
+	todayQuery := fmt.Sprintf(`
 	SELECT
 		COUNT(*) AS today_requests,
 		COALESCE(SUM(total_tokens), 0) AS today_tokens,
 		COALESCE(SUM(prompt_tokens), 0) AS today_prompt,
 		COALESCE(SUM(completion_tokens), 0) AS today_completion,
 		COALESCE(SUM(cached_tokens), 0) AS today_cached,
-		COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0) AS rpm,
-		COALESCE(SUM(CASE WHEN created_at >= $2 THEN total_tokens ELSE 0 END), 0) AS tpm,
+		COALESCE(SUM(CASE WHEN %s THEN 1 ELSE 0 END), 0) AS rpm,
+		COALESCE(SUM(CASE WHEN %s THEN total_tokens ELSE 0 END), 0) AS tpm,
 		COALESCE(AVG(duration_ms), 0) AS avg_duration_ms,
 		COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS today_errors
 	FROM usage_logs
-	WHERE created_at >= $1
+	WHERE %s
 	  AND status_code <> 499
-	`
+	`, recentCondition, recentCondition, todayCondition)
 
 	var todayErrors int64
-	err := db.conn.QueryRowContext(ctx, todayQuery, todayStart, minuteAgo).Scan(
+	err := db.conn.QueryRowContext(ctx, todayQuery, db.normalizeQueryTime(todayStart), db.normalizeQueryTime(minuteAgo)).Scan(
 		&stats.TodayRequests, &stats.TodayTokens, &stats.TotalPrompt, &stats.TotalCompletion, &stats.TotalCachedTokens,
 		&stats.RPM, &stats.TPM,
 		&stats.AvgDurationMs,
@@ -1155,17 +1157,17 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64) (*Accou
 
 // ListUsageLogsByTimeRange 按时间范围查询请求日志
 func (db *DB) ListUsageLogsByTimeRange(ctx context.Context, start, end time.Time) ([]*UsageLog, error) {
-	query := `SELECT u.id, u.account_id, u.endpoint, u.model, u.prompt_tokens, u.completion_tokens, u.total_tokens, u.status_code, u.duration_ms,
+	query := fmt.Sprintf(`SELECT u.id, u.account_id, u.endpoint, u.model, u.prompt_tokens, u.completion_tokens, u.total_tokens, u.status_code, u.duration_ms,
 	            COALESCE(u.input_tokens, 0), COALESCE(u.output_tokens, 0), COALESCE(u.reasoning_tokens, 0),
 	            COALESCE(u.first_token_ms, 0), COALESCE(u.reasoning_effort, ''), COALESCE(u.inbound_endpoint, ''),
 	            COALESCE(u.upstream_endpoint, ''), COALESCE(u.stream, false), COALESCE(u.cached_tokens, 0), COALESCE(u.service_tier, ''),
 	            COALESCE(CAST(a.credentials AS TEXT), '{}'), u.created_at
 	           FROM usage_logs u
 	           LEFT JOIN accounts a ON u.account_id = a.id
-	           WHERE u.created_at >= $1 AND u.created_at <= $2
+	           WHERE %s
 	             AND u.status_code <> 499
-	           ORDER BY u.created_at ASC`
-	rows, err := db.conn.QueryContext(ctx, query, start, end)
+	           ORDER BY u.created_at ASC`, db.timeRangeCondition("u.created_at", "$1", "$2"))
+	rows, err := db.conn.QueryContext(ctx, query, db.normalizeQueryTime(start), db.normalizeQueryTime(end))
 	if err != nil {
 		return nil, err
 	}
@@ -1220,8 +1222,8 @@ func (db *DB) ListUsageLogsByTimeRangePaged(ctx context.Context, f UsageLogFilte
 	}
 
 	// 动态拼接 WHERE 条件
-	where := `u.created_at >= $1 AND u.created_at <= $2 AND u.status_code <> 499`
-	args := []interface{}{f.Start, f.End}
+	where := db.timeRangeCondition("u.created_at", "$1", "$2") + ` AND u.status_code <> 499`
+	args := []interface{}{db.normalizeQueryTime(f.Start), db.normalizeQueryTime(f.End)}
 	paramIdx := 3
 
 	if f.Email != "" {

@@ -437,7 +437,7 @@ function toLocalRFC3339(date: Date): string {
 /** 根据 TimeRangeKey 计算时间范围的起始 ISO 字符串 */
 export function getTimeRangeISO(range: TimeRangeKey): { start: string; end: string } {
   const now = new Date()
-  const end = toLocalRFC3339(now)
+  const end = now.toISOString()
   let offsetMs: number
   switch (range) {
     case '1h':
@@ -458,6 +458,6 @@ export function getTimeRangeISO(range: TimeRangeKey): { start: string; end: stri
     default:
       offsetMs = 60 * 60 * 1000
   }
-  const start = toLocalRFC3339(new Date(now.getTime() - offsetMs))
+  const start = new Date(now.getTime() - offsetMs).toISOString()
   return { start, end }
 }

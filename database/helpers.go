@@ -148,6 +148,32 @@ func (db *DB) Label() string {
 	return "PostgreSQL"
 }
 
+func sqliteDateTimeExpr(column string) string {
+	return fmt.Sprintf("datetime(%s)", column)
+}
+
+func (db *DB) timeLowerBoundCondition(column string, param string) string {
+	if db.isSQLite() {
+		return fmt.Sprintf("%s >= datetime(%s)", sqliteDateTimeExpr(column), param)
+	}
+	return fmt.Sprintf("%s >= %s", column, param)
+}
+
+func (db *DB) timeRangeCondition(column string, startParam string, endParam string) string {
+	if db.isSQLite() {
+		expr := sqliteDateTimeExpr(column)
+		return fmt.Sprintf("%s >= datetime(%s) AND %s <= datetime(%s)", expr, startParam, expr, endParam)
+	}
+	return fmt.Sprintf("%s >= %s AND %s <= %s", column, startParam, column, endParam)
+}
+
+func (db *DB) normalizeQueryTime(value time.Time) interface{} {
+	if db.isSQLite() {
+		return value.UTC().Format("2006-01-02 15:04:05")
+	}
+	return value
+}
+
 func (db *DB) SetMaxOpenConns(n int) {
 	if db == nil || db.conn == nil {
 		return
