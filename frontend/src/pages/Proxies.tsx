@@ -2,9 +2,13 @@ import { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Globe, Plus, Trash2, Play, MapPin, Loader2, Zap, ChevronLeft, ChevronRight, Eye, EyeOff } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
-import { api, type ProxyRow, type ProxyTestResult } from '../api'
+import { Select } from '@/components/ui/select'
+import { api, type ProxyRow } from '../api'
+import { useConfirmDialog } from '../hooks/useConfirmDialog'
 
-const PAGE_SIZE = 10
+const PAGE_SIZE_OPTIONS = [10, 50, 100, 200] as const
+const REGION_ALL = '__all__'
+const REGION_UNTESTED = '__untested__'
 
 function latencyColor(ms: number): string {
   if (ms <= 0) return 'text-muted-foreground'
@@ -33,6 +37,7 @@ function maskUrl(url: string): string {
 
 export default function Proxies() {
   const { t, i18n } = useTranslation()
+  const { confirm, confirmDialog } = useConfirmDialog()
   const [proxies, setProxies] = useState<ProxyRow[]>([])
   const [loading, setLoading] = useState(true)
   const [poolEnabled, setPoolEnabled] = useState(false)
@@ -43,7 +48,10 @@ export default function Proxies() {
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [testingIds, setTestingIds] = useState<Set<number>>(new Set())
   const [testAllLoading, setTestAllLoading] = useState(false)
+  const [batchDeleting, setBatchDeleting] = useState(false)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState<number>(10)
+  const [regionFilter, setRegionFilter] = useState(REGION_ALL)
   const [revealedIds, setRevealedIds] = useState<Set<number>>(new Set())
 
   const ipApiLang = i18n.language?.startsWith('zh') ? 'zh-CN' : 'en'
@@ -57,14 +65,53 @@ export default function Proxies() {
     setLoading(false)
   }, [])
 
-  useEffect(() => { reload() }, [reload])
+  useEffect(() => { void reload() }, [reload])
 
-  const totalPages = Math.max(1, Math.ceil(proxies.length / PAGE_SIZE))
-  const pagedProxies = proxies.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const knownRegions = Array.from(
+    new Set(
+      proxies
+        .map((proxy) => proxy.test_location.trim())
+        .filter(Boolean)
+    )
+  ).sort((a, b) => a.localeCompare(b, i18n.language || undefined))
+
+  const regionOptions = [
+    { value: REGION_ALL, label: t('proxies.allRegions') },
+    { value: REGION_UNTESTED, label: t('proxies.untestedRegion') },
+    ...(
+      regionFilter !== REGION_ALL &&
+      regionFilter !== REGION_UNTESTED &&
+      !knownRegions.includes(regionFilter)
+        ? [{ value: regionFilter, label: regionFilter }]
+        : []
+    ),
+    ...knownRegions.map((location) => ({ value: location, label: location })),
+  ]
+
+  const filteredProxies = proxies.filter((proxy) => {
+    if (regionFilter === REGION_ALL) return true
+    if (regionFilter === REGION_UNTESTED) return !proxy.test_location.trim()
+    return proxy.test_location === regionFilter
+  })
+
+  const totalPages = Math.max(1, Math.ceil(filteredProxies.length / pageSize))
+  const pagedProxies = filteredProxies.slice((page - 1) * pageSize, page * pageSize)
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages)
   }, [page, totalPages])
+
+  useEffect(() => {
+    setPage(1)
+  }, [pageSize, regionFilter])
+
+  useEffect(() => {
+    const validIds = new Set(proxies.map((proxy) => proxy.id))
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => validIds.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [proxies])
 
   const handleTogglePool = async () => {
     const next = !poolEnabled
@@ -98,12 +145,25 @@ export default function Proxies() {
   }
 
   const handleBatchDelete = async () => {
-    if (selected.size === 0) return
+    const selectedIds = [...selected]
+    if (selectedIds.length === 0 || batchDeleting) return
+
+    const confirmed = await confirm({
+      title: t('proxies.batchDeleteTitle'),
+      description: t('proxies.batchDeleteDesc', { count: selectedIds.length }),
+      tone: 'destructive',
+      confirmVariant: 'destructive',
+      confirmText: t('proxies.batchDeleteConfirm'),
+    })
+    if (!confirmed) return
+
+    setBatchDeleting(true)
     try {
-      await api.batchDeleteProxies([...selected])
+      await api.batchDeleteProxies(selectedIds)
       setSelected(new Set())
       await reload()
     } catch { /* ignore */ }
+    setBatchDeleting(false)
   }
 
   const handleToggle = async (p: ProxyRow) => {
@@ -210,10 +270,13 @@ export default function Proxies() {
           {selected.size > 0 && (
             <button
               onClick={handleBatchDelete}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold bg-destructive/10 border border-destructive/30 text-destructive hover:bg-destructive/20 transition-all"
+              disabled={batchDeleting}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold bg-destructive/10 border border-destructive/30 text-destructive hover:bg-destructive/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Trash2 className="size-4" />
-              {t('proxies.deleteSelected', { count: selected.size })}
+              {batchDeleting ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+              {batchDeleting
+                ? t('proxies.deletingSelected', { count: selected.size })
+                : t('proxies.deleteSelected', { count: selected.size })}
             </button>
           )}
 
@@ -311,172 +374,209 @@ export default function Proxies() {
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-border text-left text-muted-foreground">
-                      <th className="p-3 w-10">
-                        <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} className="size-4 rounded" />
-                      </th>
-                      <th className="p-3 font-semibold">{t('proxies.colUrl')}</th>
-                      <th className="p-3 font-semibold">{t('proxies.colStatus')}</th>
-                      <th className="p-3 font-semibold">{t('proxies.colLocation')}</th>
-                      <th className="p-3 font-semibold">{t('proxies.colIp')}</th>
-                      <th className="p-3 font-semibold">{t('proxies.colLatency')}</th>
-                      <th className="p-3 font-semibold text-right">{t('proxies.colActions')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pagedProxies.map(p => {
-                      const isTesting = testingIds.has(p.id)
-                      return (
-                        <tr key={p.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                          <td className="p-3">
-                            <input
-                              type="checkbox"
-                              checked={selected.has(p.id)}
-                              onChange={() => {
-                                const next = new Set(selected)
-                                if (next.has(p.id)) next.delete(p.id)
-                                else next.add(p.id)
-                                setSelected(next)
-                              }}
-                              className="size-4 rounded"
-                            />
-                          </td>
-                          <td className="p-3 max-w-[380px]">
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => {
-                                  setRevealedIds(prev => {
-                                    const next = new Set(prev)
-                                    if (next.has(p.id)) next.delete(p.id)
-                                    else next.add(p.id)
-                                    return next
-                                  })
-                                }}
-                                className="shrink-0 flex items-center justify-center size-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all"
-                                title={revealedIds.has(p.id) ? 'Hide' : 'Show'}
-                              >
-                                {revealedIds.has(p.id) ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                              </button>
-                              <span className="font-mono text-[20px] font-bold break-all text-foreground">
-                                {revealedIds.has(p.id) ? p.url : maskUrl(p.url)}
-                              </span>
-                            </div>
-                          </td>
-                          <td className="p-3">
-                            <button
-                              onClick={() => handleToggle(p)}
-                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all ${
-                                p.enabled
-                                  ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
-                                  : 'bg-muted/50 text-muted-foreground border border-border'
-                              }`}
-                            >
-                              <span className={`size-1.5 rounded-full ${p.enabled ? 'bg-emerald-500' : 'bg-muted-foreground/50'}`} />
-                              {p.enabled ? t('proxies.enabled') : t('proxies.disabled')}
-                            </button>
-                          </td>
-                          {/* Location */}
-                          <td className="p-3">
-                            {isTesting ? (
-                              <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-                            ) : p.test_location ? (
-                              <div className="flex items-center gap-1 text-xs font-medium text-foreground whitespace-nowrap">
-                                <MapPin className="size-3 text-primary shrink-0" />
-                                {p.test_location}
-                              </div>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">-</span>
-                            )}
-                          </td>
-                          {/* IP */}
-                          <td className="p-3">
-                            {p.test_ip ? (
-                              <span className="text-[20px] font-mono font-bold text-foreground whitespace-nowrap">{p.test_ip}</span>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">-</span>
-                            )}
-                          </td>
-                          {/* Latency */}
-                          <td className="p-3">
-                            {p.test_latency_ms > 0 ? (
-                              <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-bold ${latencyColor(p.test_latency_ms)} ${latencyBg(p.test_latency_ms)}`}>
-                                {p.test_latency_ms}ms
-                              </span>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">-</span>
-                            )}
-                          </td>
-                          <td className="p-3">
-                            <div className="flex items-center gap-1.5 justify-end">
-                              <button
-                                onClick={() => handleTest(p)}
-                                disabled={isTesting}
-                                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-50"
-                                title={t('proxies.testProxy')}
-                              >
-                                {isTesting ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
-                                {t('proxies.test')}
-                              </button>
-                              <button
-                                onClick={() => handleDelete(p.id)}
-                                className="flex items-center justify-center size-7 rounded-lg text-destructive hover:bg-destructive/10 transition-all"
-                                title={t('common.delete')}
-                              >
-                                <Trash2 className="size-3.5" />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Pagination */}
-              {totalPages > 1 && (
-                <div className="flex items-center justify-between px-4 py-3 border-t border-border">
-                  <span className="text-xs text-muted-foreground">
-                    {t('proxies.pagination', { total: proxies.length, page, totalPages })}
-                  </span>
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => setPage(p => Math.max(1, p - 1))}
-                      disabled={page <= 1}
-                      className="flex items-center justify-center size-8 rounded-lg border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-                    >
-                      <ChevronLeft className="size-4" />
-                    </button>
-                    {Array.from({ length: totalPages }, (_, i) => i + 1).map(n => (
-                      <button
-                        key={n}
-                        onClick={() => setPage(n)}
-                        className={`flex items-center justify-center size-8 rounded-lg text-xs font-medium transition-all ${
-                          n === page
-                            ? 'bg-primary text-primary-foreground shadow-sm'
-                            : 'border border-border text-foreground hover:bg-muted/50'
-                        }`}
-                      >
-                        {n}
-                      </button>
-                    ))}
-                    <button
-                      onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                      disabled={page >= totalPages}
-                      className="flex items-center justify-center size-8 rounded-lg border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-                    >
-                      <ChevronRight className="size-4" />
-                    </button>
+              <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border flex-wrap">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="min-w-[180px]">
+                    <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                      {t('proxies.regionFilter')}
+                    </div>
+                    <Select
+                      compact
+                      value={regionFilter}
+                      onValueChange={setRegionFilter}
+                      options={regionOptions}
+                    />
+                  </div>
+                  <div className="min-w-[120px]">
+                    <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                      {t('proxies.pageSize')}
+                    </div>
+                    <Select
+                      compact
+                      value={String(pageSize)}
+                      onValueChange={(value) => setPageSize(Number(value))}
+                      options={PAGE_SIZE_OPTIONS.map((size) => ({ value: String(size), label: String(size) }))}
+                    />
                   </div>
                 </div>
+                <div className="text-xs text-muted-foreground">
+                  {t('proxies.filteredCount', { count: filteredProxies.length })}
+                </div>
+              </div>
+
+              {filteredProxies.length === 0 ? (
+                <div className="text-center py-16 text-muted-foreground">
+                  <Globe className="size-12 mx-auto mb-3 opacity-30" />
+                  <p className="text-sm font-medium">{t('proxies.noFilteredProxies')}</p>
+                  <p className="text-xs mt-1">{t('proxies.noFilteredProxiesDesc')}</p>
+                </div>
+              ) : (
+                <>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-border text-left text-muted-foreground">
+                          <th className="p-3 w-10">
+                            <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} className="size-4 rounded" />
+                          </th>
+                          <th className="p-3 font-semibold">{t('proxies.colUrl')}</th>
+                          <th className="p-3 font-semibold">{t('proxies.colStatus')}</th>
+                          <th className="p-3 font-semibold">{t('proxies.colLocation')}</th>
+                          <th className="p-3 font-semibold">{t('proxies.colIp')}</th>
+                          <th className="p-3 font-semibold">{t('proxies.colLatency')}</th>
+                          <th className="p-3 font-semibold text-right">{t('proxies.colActions')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pagedProxies.map(p => {
+                          const isTesting = testingIds.has(p.id)
+                          return (
+                            <tr key={p.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                              <td className="p-3">
+                                <input
+                                  type="checkbox"
+                                  checked={selected.has(p.id)}
+                                  onChange={() => {
+                                    const next = new Set(selected)
+                                    if (next.has(p.id)) next.delete(p.id)
+                                    else next.add(p.id)
+                                    setSelected(next)
+                                  }}
+                                  className="size-4 rounded"
+                                />
+                              </td>
+                              <td className="p-3 max-w-[380px]">
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={() => {
+                                      setRevealedIds(prev => {
+                                        const next = new Set(prev)
+                                        if (next.has(p.id)) next.delete(p.id)
+                                        else next.add(p.id)
+                                        return next
+                                      })
+                                    }}
+                                    className="shrink-0 flex items-center justify-center size-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all"
+                                    title={revealedIds.has(p.id) ? 'Hide' : 'Show'}
+                                  >
+                                    {revealedIds.has(p.id) ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                                  </button>
+                                  <span className="font-mono text-[20px] font-bold break-all text-foreground">
+                                    {revealedIds.has(p.id) ? p.url : maskUrl(p.url)}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="p-3">
+                                <button
+                                  onClick={() => handleToggle(p)}
+                                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all ${
+                                    p.enabled
+                                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
+                                      : 'bg-muted/50 text-muted-foreground border border-border'
+                                  }`}
+                                >
+                                  <span className={`size-1.5 rounded-full ${p.enabled ? 'bg-emerald-500' : 'bg-muted-foreground/50'}`} />
+                                  {p.enabled ? t('proxies.enabled') : t('proxies.disabled')}
+                                </button>
+                              </td>
+                              <td className="p-3">
+                                {isTesting ? (
+                                  <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                                ) : p.test_location ? (
+                                  <div className="flex items-center gap-1 text-xs font-medium text-foreground whitespace-nowrap">
+                                    <MapPin className="size-3 text-primary shrink-0" />
+                                    {p.test_location}
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">-</span>
+                                )}
+                              </td>
+                              <td className="p-3">
+                                {p.test_ip ? (
+                                  <span className="text-[20px] font-mono font-bold text-foreground whitespace-nowrap">{p.test_ip}</span>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">-</span>
+                                )}
+                              </td>
+                              <td className="p-3">
+                                {p.test_latency_ms > 0 ? (
+                                  <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-bold ${latencyColor(p.test_latency_ms)} ${latencyBg(p.test_latency_ms)}`}>
+                                    {p.test_latency_ms}ms
+                                  </span>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">-</span>
+                                )}
+                              </td>
+                              <td className="p-3">
+                                <div className="flex items-center gap-1.5 justify-end">
+                                  <button
+                                    onClick={() => handleTest(p)}
+                                    disabled={isTesting}
+                                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-50"
+                                    title={t('proxies.testProxy')}
+                                  >
+                                    {isTesting ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
+                                    {t('proxies.test')}
+                                  </button>
+                                  <button
+                                    onClick={() => handleDelete(p.id)}
+                                    className="flex items-center justify-center size-7 rounded-lg text-destructive hover:bg-destructive/10 transition-all"
+                                    title={t('common.delete')}
+                                  >
+                                    <Trash2 className="size-3.5" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {totalPages > 1 && (
+                    <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+                      <span className="text-xs text-muted-foreground">
+                        {t('proxies.pagination', { total: filteredProxies.length, page, totalPages })}
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => setPage(p => Math.max(1, p - 1))}
+                          disabled={page <= 1}
+                          className="flex items-center justify-center size-8 rounded-lg border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                          <ChevronLeft className="size-4" />
+                        </button>
+                        {Array.from({ length: totalPages }, (_, i) => i + 1).map(n => (
+                          <button
+                            key={n}
+                            onClick={() => setPage(n)}
+                            className={`flex items-center justify-center size-8 rounded-lg text-xs font-medium transition-all ${
+                              n === page
+                                ? 'bg-primary text-primary-foreground shadow-sm'
+                                : 'border border-border text-foreground hover:bg-muted/50'
+                            }`}
+                          >
+                            {n}
+                          </button>
+                        ))}
+                        <button
+                          onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                          disabled={page >= totalPages}
+                          className="flex items-center justify-center size-8 rounded-lg border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                          <ChevronRight className="size-4" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}
         </CardContent>
       </Card>
+      {confirmDialog}
     </div>
   )
 }

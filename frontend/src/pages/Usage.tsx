@@ -52,6 +52,14 @@ function getStatusBadgeClassName(statusCode: number): string {
 }
 
 const TIME_RANGE_OPTIONS: TimeRangeKey[] = ['1h', '6h', '24h', '7d', '30d']
+type StreamFilterValue = '' | 'true' | 'false'
+
+function toStreamFilterValue(value: string): StreamFilterValue {
+  if (value === 'true' || value === 'false') {
+    return value
+  }
+  return ''
+}
 
 export default function Usage() {
   const { t } = useTranslation()
@@ -68,7 +76,7 @@ export default function Usage() {
   const [filterModel, setFilterModel] = useState('')
   const [filterEndpoint, setFilterEndpoint] = useState('')
   const [filterFast, setFilterFast] = useState('')
-  const [filterStream, setFilterStream] = useState<'' | 'true' | 'false'>('')
+  const [filterStream, setFilterStream] = useState<StreamFilterValue>('')
   const showFastFilter = false
   const PAGE_SIZE = 20
   const searchTimer = useRef<ReturnType<typeof setTimeout>>(null)
@@ -349,7 +357,7 @@ export default function Usage() {
                 className="w-32"
                 compact
                 value={filterStream}
-                onValueChange={(v) => { setFilterStream(v); setPage(1) }}
+                onValueChange={(v) => { setFilterStream(toStreamFilterValue(v)); setPage(1) }}
                 placeholder={t('usage.allTypes')}
                 options={[
                   { label: t('usage.allTypes'), value: '' },
