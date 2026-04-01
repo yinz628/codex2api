@@ -22,6 +22,7 @@ RUN VITE_APP_VERSION=${BUILD_VERSION} npm run build
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS go-builder
 
 ARG TARGETARCH
+ARG GO_BUILD_PARALLEL=1
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -33,7 +34,8 @@ COPY --from=frontend-builder /frontend/dist ./frontend/dist
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /codex2api .
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+    go build -p=${GO_BUILD_PARALLEL} -ldflags="-s -w" -o /codex2api .
 
 # ============================================================
 # Stage 3: 最终运行镜像
