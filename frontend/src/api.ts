@@ -203,7 +203,10 @@ export interface ProxyRow {
   created_at: string
   test_ip: string
   test_location: string
+  test_country: string
   test_latency_ms: number
+  quality_status: string
+  quality_status_code: number
 }
 
 export interface ProxyTestResult {
@@ -215,5 +218,8 @@ export interface ProxyTestResult {
   isp?: string
   latency_ms?: number
   location?: string
+  test_country?: string
+  quality_status?: string
+  quality_status_code?: number
   error?: string
 }

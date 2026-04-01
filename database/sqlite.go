@@ -94,7 +94,10 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			test_ip TEXT DEFAULT '',
 			test_location TEXT DEFAULT '',
-			test_latency_ms INTEGER DEFAULT 0
+			test_country TEXT DEFAULT '',
+			test_latency_ms INTEGER DEFAULT 0,
+			quality_status TEXT DEFAULT '',
+			quality_status_code INTEGER DEFAULT 0
 		);`,
 		`CREATE TABLE IF NOT EXISTS account_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,7 +144,10 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "allow_remote_migration", "INTEGER DEFAULT 0"},
 		{"proxies", "test_ip", "TEXT DEFAULT ''"},
 		{"proxies", "test_location", "TEXT DEFAULT ''"},
+		{"proxies", "test_country", "TEXT DEFAULT ''"},
 		{"proxies", "test_latency_ms", "INTEGER DEFAULT 0"},
+		{"proxies", "quality_status", "TEXT DEFAULT ''"},
+		{"proxies", "quality_status_code", "INTEGER DEFAULT 0"},
 	}
 	for _, column := range columns {
 		if err := db.ensureSQLiteColumn(ctx, column.table, column.name, column.def); err != nil {

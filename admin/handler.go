@@ -746,7 +746,7 @@ func (h *Handler) importAccountsJSON(c *gin.Context, proxyURL string) {
 
 // importEvent SSE 导入进度事件
 type importEvent struct {
-	Type      string `json:"type"`                // progress | complete
+	Type      string `json:"type"` // progress | complete
 	Current   int    `json:"current"`
 	Total     int    `json:"total"`
 	Success   int    `json:"success"`
@@ -2174,24 +2174,37 @@ func (h *Handler) TestProxy(c *gin.Context) {
 	region := result.Get("regionName").String()
 	city := result.Get("city").String()
 	isp := result.Get("isp").String()
-	location := country + "·" + region + "·" + city
+	location := buildProxyLocation(country, region, city)
+	testCountry := normalizeProxyCountry(country, location)
+	quality := runProxyQualityCheck(client)
 
 	// 持久化测试结果
 	if req.ID > 0 {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 		defer cancel()
-		_ = h.db.UpdateProxyTestResult(ctx, req.ID, ip, location, latencyMs)
+		_ = h.db.UpdateProxyTestResult(
+			ctx,
+			req.ID,
+			ip,
+			location,
+			testCountry,
+			latencyMs,
+			quality.Status,
+			quality.StatusCode,
+		)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"success":    true,
-		"ip":         ip,
-		"country":    country,
-		"region":     region,
-		"city":       city,
-		"isp":        isp,
-		"latency_ms": latencyMs,
-		"location":   location,
+	c.JSON(http.StatusOK, proxyTestResponse{
+		Success:           true,
+		IP:                ip,
+		Country:           country,
+		Region:            region,
+		City:              city,
+		ISP:               isp,
+		LatencyMs:         latencyMs,
+		Location:          location,
+		TestCountry:       testCountry,
+		QualityStatus:     quality.Status,
+		QualityStatusCode: quality.StatusCode,
 	})
 }
-

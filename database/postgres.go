@@ -273,7 +273,10 @@ func (db *DB) migrate(ctx context.Context) error {
 	);
 	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS test_ip VARCHAR(100) DEFAULT '';
 	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS test_location VARCHAR(255) DEFAULT '';
+	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS test_country VARCHAR(100) DEFAULT '';
 	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS test_latency_ms INT DEFAULT 0;
+	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS quality_status VARCHAR(20) DEFAULT '';
+	ALTER TABLE proxies ADD COLUMN IF NOT EXISTS quality_status_code INT DEFAULT 0;
 
 	CREATE TABLE IF NOT EXISTS account_events (
 		id         SERIAL PRIMARY KEY,
@@ -442,19 +445,22 @@ func (db *DB) GetAllAPIKeyValues(ctx context.Context) ([]string, error) {
 
 // ProxyRow 代理行
 type ProxyRow struct {
-	ID            int64     `json:"id"`
-	URL           string    `json:"url"`
-	Label         string    `json:"label"`
-	Enabled       bool      `json:"enabled"`
-	CreatedAt     time.Time `json:"created_at"`
-	TestIP        string    `json:"test_ip"`
-	TestLocation  string    `json:"test_location"`
-	TestLatencyMs int       `json:"test_latency_ms"`
+	ID                int64     `json:"id"`
+	URL               string    `json:"url"`
+	Label             string    `json:"label"`
+	Enabled           bool      `json:"enabled"`
+	CreatedAt         time.Time `json:"created_at"`
+	TestIP            string    `json:"test_ip"`
+	TestLocation      string    `json:"test_location"`
+	TestCountry       string    `json:"test_country"`
+	TestLatencyMs     int       `json:"test_latency_ms"`
+	QualityStatus     string    `json:"quality_status"`
+	QualityStatusCode int       `json:"quality_status_code"`
 }
 
 // ListProxies 获取所有代理
 func (db *DB) ListProxies(ctx context.Context) ([]*ProxyRow, error) {
-	rows, err := db.conn.QueryContext(ctx, `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_latency_ms,0) FROM proxies ORDER BY id`)
+	rows, err := db.conn.QueryContext(ctx, `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_country,''), COALESCE(test_latency_ms,0), COALESCE(quality_status,''), COALESCE(quality_status_code,0) FROM proxies ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -464,7 +470,7 @@ func (db *DB) ListProxies(ctx context.Context) ([]*ProxyRow, error) {
 	for rows.Next() {
 		p := &ProxyRow{}
 		var createdAtRaw interface{}
-		if err := rows.Scan(&p.ID, &p.URL, &p.Label, &p.Enabled, &createdAtRaw, &p.TestIP, &p.TestLocation, &p.TestLatencyMs); err != nil {
+		if err := rows.Scan(&p.ID, &p.URL, &p.Label, &p.Enabled, &createdAtRaw, &p.TestIP, &p.TestLocation, &p.TestCountry, &p.TestLatencyMs, &p.QualityStatus, &p.QualityStatusCode); err != nil {
 			return nil, err
 		}
 		p.CreatedAt, err = parseDBTimeValue(createdAtRaw)
@@ -478,9 +484,9 @@ func (db *DB) ListProxies(ctx context.Context) ([]*ProxyRow, error) {
 
 // ListEnabledProxies 获取已启用的代理
 func (db *DB) ListEnabledProxies(ctx context.Context) ([]*ProxyRow, error) {
-	query := `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_latency_ms,0) FROM proxies WHERE enabled = true ORDER BY id`
+	query := `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_country,''), COALESCE(test_latency_ms,0), COALESCE(quality_status,''), COALESCE(quality_status_code,0) FROM proxies WHERE enabled = true ORDER BY id`
 	if db.isSQLite() {
-		query = `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_latency_ms,0) FROM proxies WHERE enabled = 1 ORDER BY id`
+		query = `SELECT id, url, label, enabled, created_at, COALESCE(test_ip,''), COALESCE(test_location,''), COALESCE(test_country,''), COALESCE(test_latency_ms,0), COALESCE(quality_status,''), COALESCE(quality_status_code,0) FROM proxies WHERE enabled = 1 ORDER BY id`
 	}
 	rows, err := db.conn.QueryContext(ctx, query)
 	if err != nil {
@@ -492,7 +498,7 @@ func (db *DB) ListEnabledProxies(ctx context.Context) ([]*ProxyRow, error) {
 	for rows.Next() {
 		p := &ProxyRow{}
 		var createdAtRaw interface{}
-		if err := rows.Scan(&p.ID, &p.URL, &p.Label, &p.Enabled, &createdAtRaw, &p.TestIP, &p.TestLocation, &p.TestLatencyMs); err != nil {
+		if err := rows.Scan(&p.ID, &p.URL, &p.Label, &p.Enabled, &createdAtRaw, &p.TestIP, &p.TestLocation, &p.TestCountry, &p.TestLatencyMs, &p.QualityStatus, &p.QualityStatusCode); err != nil {
 			return nil, err
 		}
 		p.CreatedAt, err = parseDBTimeValue(createdAtRaw)
@@ -581,10 +587,10 @@ func (db *DB) UpdateProxy(ctx context.Context, id int64, label *string, enabled 
 }
 
 // UpdateProxyTestResult 更新代理测试结果
-func (db *DB) UpdateProxyTestResult(ctx context.Context, id int64, ip, location string, latencyMs int) error {
+func (db *DB) UpdateProxyTestResult(ctx context.Context, id int64, ip, location, country string, latencyMs int, qualityStatus string, qualityStatusCode int) error {
 	_, err := db.conn.ExecContext(ctx,
-		`UPDATE proxies SET test_ip = $1, test_location = $2, test_latency_ms = $3 WHERE id = $4`,
-		ip, location, latencyMs, id)
+		`UPDATE proxies SET test_ip = $1, test_location = $2, test_country = $3, test_latency_ms = $4, quality_status = $5, quality_status_code = $6 WHERE id = $7`,
+		ip, location, country, latencyMs, qualityStatus, qualityStatusCode, id)
 	return err
 }
 

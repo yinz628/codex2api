@@ -3,12 +3,14 @@ import { useTranslation } from 'react-i18next'
 import { Globe, Plus, Trash2, Play, MapPin, Loader2, Zap, ChevronLeft, ChevronRight, Eye, EyeOff } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Select } from '@/components/ui/select'
-import { api, type ProxyRow } from '../api'
+import { api, type ProxyRow, type ProxyTestResult } from '../api'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 
 const PAGE_SIZE_OPTIONS = [10, 50, 100, 200] as const
 const REGION_ALL = '__all__'
 const REGION_UNTESTED = '__untested__'
+type ProxySortKey = 'latency' | 'quality'
+type SortDirection = 'asc' | 'desc'
 
 function latencyColor(ms: number): string {
   if (ms <= 0) return 'text-muted-foreground'
@@ -35,6 +37,92 @@ function maskUrl(url: string): string {
   }
 }
 
+function extractCountryFromLocation(location: string): string {
+  const value = location.trim()
+  if (!value) return ''
+
+  for (const separator of [' / ', '·', '•', '|', ',', ':']) {
+    const index = value.indexOf(separator)
+    if (index > 0) {
+      return value.slice(0, index).trim()
+    }
+  }
+
+  return value
+}
+
+function getProxyCountry(proxy: Pick<ProxyRow, 'test_country' | 'test_location'>): string {
+  return proxy.test_country.trim() || extractCountryFromLocation(proxy.test_location)
+}
+
+function getLatencySortValue(proxy: Pick<ProxyRow, 'test_latency_ms'>): number | null {
+  return proxy.test_latency_ms > 0 ? proxy.test_latency_ms : null
+}
+
+function getQualityRank(proxy: Pick<ProxyRow, 'quality_status'>): number {
+  switch (proxy.quality_status) {
+    case 'warn':
+      return 2
+    case 'fail':
+      return 1
+    default:
+      return 0
+  }
+}
+
+function compareNullableNumber(left: number | null, right: number | null, sortDir: SortDirection): number {
+  if (left === null && right === null) return 0
+  if (left === null) return 1
+  if (right === null) return -1
+  return sortDir === 'asc' ? left - right : right - left
+}
+
+function compareProxies(left: ProxyRow, right: ProxyRow, sortKey: ProxySortKey | null, sortDir: SortDirection): number {
+  if (!sortKey) return 0
+
+  if (sortKey === 'latency') {
+    return compareNullableNumber(getLatencySortValue(left), getLatencySortValue(right), sortDir)
+  }
+
+  const leftRank = getQualityRank(left)
+  const rightRank = getQualityRank(right)
+  if (leftRank === 0 && rightRank === 0) return 0
+  if (leftRank === 0) return 1
+  if (rightRank === 0) return -1
+  if (leftRank !== rightRank) {
+    return sortDir === 'asc' ? leftRank - rightRank : rightRank - leftRank
+  }
+
+  return compareNullableNumber(
+    left.quality_status_code > 0 ? left.quality_status_code : null,
+    right.quality_status_code > 0 ? right.quality_status_code : null,
+    sortDir
+  )
+}
+
+function mergeProxyTestResult(proxy: ProxyRow, result: ProxyTestResult): ProxyRow {
+  return {
+    ...proxy,
+    test_ip: result.ip || '',
+    test_location: result.location || '',
+    test_country: result.test_country || result.country || '',
+    test_latency_ms: result.latency_ms || 0,
+    quality_status: result.quality_status || '',
+    quality_status_code: result.quality_status_code || 0,
+  }
+}
+
+function qualityBadgeClass(status: string): string {
+  switch (status) {
+    case 'warn':
+      return 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
+    case 'fail':
+      return 'bg-red-500/10 text-red-600 dark:text-red-400'
+    default:
+      return 'text-muted-foreground'
+  }
+}
+
 export default function Proxies() {
   const { t, i18n } = useTranslation()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -52,6 +140,8 @@ export default function Proxies() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState<number>(10)
   const [regionFilter, setRegionFilter] = useState(REGION_ALL)
+  const [sortKey, setSortKey] = useState<ProxySortKey | null>(null)
+  const [sortDir, setSortDir] = useState<SortDirection>('asc')
   const [revealedIds, setRevealedIds] = useState<Set<number>>(new Set())
 
   const ipApiLang = i18n.language?.startsWith('zh') ? 'zh-CN' : 'en'
@@ -67,10 +157,10 @@ export default function Proxies() {
 
   useEffect(() => { void reload() }, [reload])
 
-  const knownRegions = Array.from(
+  const knownCountries = Array.from(
     new Set(
       proxies
-        .map((proxy) => proxy.test_location.trim())
+        .map((proxy) => getProxyCountry(proxy))
         .filter(Boolean)
     )
   ).sort((a, b) => a.localeCompare(b, i18n.language || undefined))
@@ -81,21 +171,24 @@ export default function Proxies() {
     ...(
       regionFilter !== REGION_ALL &&
       regionFilter !== REGION_UNTESTED &&
-      !knownRegions.includes(regionFilter)
+      !knownCountries.includes(regionFilter)
         ? [{ value: regionFilter, label: regionFilter }]
         : []
     ),
-    ...knownRegions.map((location) => ({ value: location, label: location })),
+    ...knownCountries.map((country) => ({ value: country, label: country })),
   ]
 
   const filteredProxies = proxies.filter((proxy) => {
+    const country = getProxyCountry(proxy)
     if (regionFilter === REGION_ALL) return true
-    if (regionFilter === REGION_UNTESTED) return !proxy.test_location.trim()
-    return proxy.test_location === regionFilter
+    if (regionFilter === REGION_UNTESTED) return !country
+    return country === regionFilter
   })
 
-  const totalPages = Math.max(1, Math.ceil(filteredProxies.length / pageSize))
-  const pagedProxies = filteredProxies.slice((page - 1) * pageSize, page * pageSize)
+  const sortedProxies = [...filteredProxies].sort((left, right) => compareProxies(left, right, sortKey, sortDir))
+
+  const totalPages = Math.max(1, Math.ceil(sortedProxies.length / pageSize))
+  const pagedProxies = sortedProxies.slice((page - 1) * pageSize, page * pageSize)
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages)
@@ -180,7 +273,7 @@ export default function Proxies() {
       if (result.success) {
         setProxies(prev => prev.map(px =>
           px.id === p.id
-            ? { ...px, test_ip: result.ip || '', test_location: result.location || '', test_latency_ms: result.latency_ms || 0 }
+            ? mergeProxyTestResult(px, result)
             : px
         ))
       }
@@ -201,7 +294,7 @@ export default function Proxies() {
         if (result.success) {
           setProxies(prev => prev.map(px =>
             px.id === p.id
-              ? { ...px, test_ip: result.ip || '', test_location: result.location || '', test_latency_ms: result.latency_ms || 0 }
+              ? mergeProxyTestResult(px, result)
               : px
           ))
         }
@@ -213,6 +306,16 @@ export default function Proxies() {
       })
     }
     setTestAllLoading(false)
+  }
+
+  const handleSort = (key: ProxySortKey) => {
+    if (sortKey === key) {
+      setSortDir((prev) => prev === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortKey(key)
+      setSortDir(key === 'latency' ? 'asc' : 'desc')
+    }
+    setPage(1)
   }
 
   const allSelected = pagedProxies.length > 0 && pagedProxies.every(p => selected.has(p.id))
@@ -400,11 +503,11 @@ export default function Proxies() {
                   </div>
                 </div>
                 <div className="text-xs text-muted-foreground">
-                  {t('proxies.filteredCount', { count: filteredProxies.length })}
+                  {t('proxies.filteredCount', { count: sortedProxies.length })}
                 </div>
               </div>
 
-              {filteredProxies.length === 0 ? (
+              {sortedProxies.length === 0 ? (
                 <div className="text-center py-16 text-muted-foreground">
                   <Globe className="size-12 mx-auto mb-3 opacity-30" />
                   <p className="text-sm font-medium">{t('proxies.noFilteredProxies')}</p>
@@ -423,7 +526,26 @@ export default function Proxies() {
                           <th className="p-3 font-semibold">{t('proxies.colStatus')}</th>
                           <th className="p-3 font-semibold">{t('proxies.colLocation')}</th>
                           <th className="p-3 font-semibold">{t('proxies.colIp')}</th>
-                          <th className="p-3 font-semibold">{t('proxies.colLatency')}</th>
+                          <th className="p-3 font-semibold">
+                            <button
+                              type="button"
+                              onClick={() => handleSort('latency')}
+                              className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
+                            >
+                              {t('proxies.colLatency')}
+                              {sortKey === 'latency' ? (sortDir === 'asc' ? '^' : 'v') : ''}
+                            </button>
+                          </th>
+                          <th className="p-3 font-semibold">
+                            <button
+                              type="button"
+                              onClick={() => handleSort('quality')}
+                              className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
+                            >
+                              {t('proxies.colQuality')}
+                              {sortKey === 'quality' ? (sortDir === 'asc' ? '^' : 'v') : ''}
+                            </button>
+                          </th>
                           <th className="p-3 font-semibold text-right">{t('proxies.colActions')}</th>
                         </tr>
                       </thead>
@@ -508,6 +630,16 @@ export default function Proxies() {
                                 )}
                               </td>
                               <td className="p-3">
+                                {p.quality_status ? (
+                                  <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-bold ${qualityBadgeClass(p.quality_status)}`}>
+                                    {p.quality_status.toUpperCase()}
+                                    {p.quality_status_code > 0 ? ` ${p.quality_status_code}` : ''}
+                                  </span>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">-</span>
+                                )}
+                              </td>
+                              <td className="p-3">
                                 <div className="flex items-center gap-1.5 justify-end">
                                   <button
                                     onClick={() => handleTest(p)}
@@ -537,7 +669,7 @@ export default function Proxies() {
                   {totalPages > 1 && (
                     <div className="flex items-center justify-between px-4 py-3 border-t border-border">
                       <span className="text-xs text-muted-foreground">
-                        {t('proxies.pagination', { total: filteredProxies.length, page, totalPages })}
+                        {t('proxies.pagination', { total: sortedProxies.length, page, totalPages })}
                       </span>
                       <div className="flex items-center gap-1">
                         <button
