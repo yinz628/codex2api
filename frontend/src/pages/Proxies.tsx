@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Globe, Plus, Trash2, Play, MapPin, Loader2, Zap, ChevronLeft, ChevronRight, Eye, EyeOff } from 'lucide-react'
+import { Globe, Plus, Trash2, Play, MapPin, Loader2, Zap, ChevronLeft, ChevronRight, Eye, EyeOff, Download } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Select } from '@/components/ui/select'
 import { api, type ProxyRow, type ProxyTestResult } from '../api'
@@ -259,6 +259,16 @@ export default function Proxies() {
     setBatchDeleting(false)
   }
 
+  const handleExportSelected = () => {
+    const selectedProxies = proxies.filter((proxy) => selected.has(proxy.id))
+    if (selectedProxies.length === 0) return
+
+    const text = selectedProxies.map((proxy) => proxy.url).join('\n')
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    downloadBlob(blob, `proxies-selected-${ts}-${selectedProxies.length}.txt`)
+  }
+
   const handleToggle = async (p: ProxyRow) => {
     try {
       await api.updateProxy(p.id, { enabled: !p.enabled })
@@ -369,6 +379,16 @@ export default function Proxies() {
               <span className={`pointer-events-none inline-block size-5 transform rounded-full bg-white shadow-lg ring-0 transition-transform duration-200 ${poolEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
             </button>
           </div>
+
+          {selected.size > 0 && (
+            <button
+              onClick={handleExportSelected}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold border border-border text-foreground hover:bg-muted/50 transition-all"
+            >
+              <Download className="size-4" />
+              {`${t('accounts.export')} (${selected.size})`}
+            </button>
+          )}
 
           {selected.size > 0 && (
             <button
@@ -711,4 +731,15 @@ export default function Proxies() {
       {confirmDialog}
     </div>
   )
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
 }
