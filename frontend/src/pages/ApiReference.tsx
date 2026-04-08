@@ -950,6 +950,7 @@ curl --request POST \\
         path="/api/admin/accounts/:id"
         title={t('apiRef.deleteAccount.title')}
         description={t('apiRef.deleteAccount.desc')}
+        enableTryIt={false}
         apiKey={firstKey}
         baseUrl={baseUrl}
         allKeys={allKeys}
