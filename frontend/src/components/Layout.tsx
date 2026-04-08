@@ -1,6 +1,6 @@
 import { type PropsWithChildren, type ReactNode, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Users, Activity, Settings, Server, Workflow, Sun, Moon, Languages, Globe } from 'lucide-react'
+import { LayoutDashboard, Users, Activity, Settings, Server, Workflow, Sun, Moon, Languages, Globe, BookOpen, FileCode2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import logoImg from '../assets/logo.png'
 import { useTheme } from '../hooks/useTheme'
@@ -21,6 +21,8 @@ const navDefs: NavDef[] = [
   { to: '/ops/scheduler', labelKey: 'nav.scheduler', icon: <Workflow className="size-[18px]" />, end: true },
   { to: '/usage', labelKey: 'nav.usage', icon: <Activity className="size-[18px]" /> },
   { to: '/settings', labelKey: 'nav.settings', icon: <Settings className="size-[18px]" /> },
+  { to: '/docs', labelKey: 'nav2.docs', icon: <BookOpen className="size-[18px]" /> },
+  { to: '/api-reference', labelKey: 'nav2.apiRef', icon: <FileCode2 className="size-[18px]" /> },
 ]
 
 export default function Layout({ children }: PropsWithChildren) {
@@ -130,7 +132,7 @@ export default function Layout({ children }: PropsWithChildren) {
         </aside>
 
         {/* Main content */}
-        <main className="min-w-0 p-6 max-lg:pb-[104px]">
+        <main className="min-w-0 p-6 max-lg:pb-[256px]">
           {/* Mobile topbar */}
           <header className="hidden max-lg:flex items-center justify-between gap-4 mb-4 p-3.5 border border-border rounded-[22px] bg-white/70 dark:bg-[hsl(220_13%_15%/0.7)]">
             <div className="flex items-center gap-3">
@@ -164,7 +166,7 @@ export default function Layout({ children }: PropsWithChildren) {
         </main>
 
         {/* Mobile bottom nav */}
-        <nav className="fixed left-4 right-4 bottom-4 z-40 hidden max-lg:grid grid-cols-6 gap-2 p-2 border border-border rounded-3xl bg-white/90 shadow-lg backdrop-blur-[20px]" aria-label="Mobile navigation">
+        <nav className="fixed left-4 right-4 bottom-4 z-40 hidden max-lg:grid grid-cols-4 gap-2 p-2 border border-border rounded-3xl bg-white/90 shadow-lg backdrop-blur-[20px]" aria-label="Mobile navigation">
           {navDefs.map((item) => (
             <NavLink
               key={item.to}

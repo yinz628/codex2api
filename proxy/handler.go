@@ -27,13 +27,20 @@ type Handler struct {
 	store      *auth.Store
 	configKeys map[string]bool // 配置文件中的静态 key
 	db         *database.DB
-	cfg        *config.Config  // 全局配置
+	cfg        *config.Config       // 全局配置
 	deviceCfg  *DeviceProfileConfig // 设备指纹配置
 
 	// 动态 key 缓存
 	dbKeysMu    sync.RWMutex
-	dbKeys      map[string]bool
+	dbKeys      map[string]*database.APIKeyRow
 	dbKeysUntil time.Time
+}
+
+func (h *Handler) nextAccountForSession(sessionID string, exclude map[int64]bool) (*auth.Account, string) {
+	if h == nil || h.store == nil {
+		return nil, ""
+	}
+	return h.store.NextForSession(sessionID, exclude)
 }
 
 type usageLimitDetails struct {
@@ -42,6 +49,12 @@ type usageLimitDetails struct {
 	resetsAt        int64
 	resetsInSeconds int64
 }
+
+const (
+	contextAPIKeyID     = "apiKeyID"
+	contextAPIKeyName   = "apiKeyName"
+	contextAPIKeyMasked = "apiKeyMasked"
+)
 
 // NewHandler 创建处理器
 func NewHandler(store *auth.Store, db *database.DB, cfg *config.Config, deviceCfg *DeviceProfileConfig) *Handler {
@@ -60,7 +73,7 @@ func NewHandlerWithDeviceProfile(store *auth.Store, db *database.DB, deviceCfg *
 }
 
 // refreshDBKeys 从数据库刷新密钥缓存（5 分钟）
-func (h *Handler) refreshDBKeys() map[string]bool {
+func (h *Handler) refreshDBKeys() map[string]*database.APIKeyRow {
 	h.dbKeysMu.RLock()
 	if time.Now().Before(h.dbKeysUntil) {
 		keys := h.dbKeys
@@ -79,28 +92,41 @@ func (h *Handler) refreshDBKeys() map[string]bool {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	vals, err := h.db.GetAllAPIKeyValues(ctx)
+	rows, err := h.db.ListAPIKeys(ctx)
 	if err != nil {
 		log.Printf("刷新 API Keys 缓存失败: %v", err)
 		return h.dbKeys
 	}
 
-	newMap := make(map[string]bool, len(vals))
-	for _, v := range vals {
-		newMap[v] = true
+	newMap := make(map[string]*database.APIKeyRow, len(rows))
+	for _, row := range rows {
+		if row == nil || row.Key == "" {
+			continue
+		}
+		newMap[row.Key] = row
 	}
 	h.dbKeys = newMap
 	h.dbKeysUntil = time.Now().Add(5 * time.Minute)
 	return newMap
 }
 
-// isValidKey 检查 key 是否有效（配置文件 + DB）
-func (h *Handler) isValidKey(key string) bool {
+func (h *Handler) resolveAPIKey(key string) (*database.APIKeyRow, bool) {
 	if h.configKeys[key] {
-		return true
+		return &database.APIKeyRow{
+			ID:   0,
+			Name: "config",
+			Key:  key,
+		}, true
 	}
 	dbKeys := h.refreshDBKeys()
-	return dbKeys[key]
+	row, ok := dbKeys[key]
+	return row, ok
+}
+
+// isValidKey 检查 key 是否有效（配置文件 + DB）
+func (h *Handler) isValidKey(key string) bool {
+	_, ok := h.resolveAPIKey(key)
+	return ok
 }
 
 // hasAnyKeys 检查是否配置了任何密钥
@@ -118,6 +144,35 @@ func (h *Handler) logUsage(input *database.UsageLogInput) {
 		return
 	}
 	_ = h.db.InsertUsageLog(context.Background(), input)
+}
+
+func populateAPIKeyMetaFromContext(c *gin.Context, input *database.UsageLogInput) {
+	if c == nil || input == nil {
+		return
+	}
+	if v, exists := c.Get(contextAPIKeyID); exists && v != nil {
+		switch typed := v.(type) {
+		case int64:
+			input.APIKeyID = typed
+		case int:
+			input.APIKeyID = int64(typed)
+		}
+	}
+	if v, exists := c.Get(contextAPIKeyName); exists && v != nil {
+		if name, ok := v.(string); ok {
+			input.APIKeyName = name
+		}
+	}
+	if v, exists := c.Get(contextAPIKeyMasked); exists && v != nil {
+		if masked, ok := v.(string); ok {
+			input.APIKeyMasked = masked
+		}
+	}
+}
+
+func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInput) {
+	populateAPIKeyMetaFromContext(c, input)
+	h.logUsage(input)
 }
 
 // extractReasoningEffort 从请求体提取推理强度
@@ -233,11 +288,21 @@ func shouldTransparentRetryStream(outcome streamOutcome, attempt int, maxRetries
 
 // RegisterRoutes 注册路由
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
+	auth := h.authMiddleware()
+
+	// /v1 前缀路由（标准路径）
 	v1 := r.Group("/v1")
-	v1.Use(h.authMiddleware())
+	v1.Use(auth)
 	v1.POST("/chat/completions", h.ChatCompletions)
 	v1.POST("/responses", h.Responses)
+	v1.POST("/messages", h.Messages)
 	v1.GET("/models", h.ListModels)
+
+	// 无前缀路由（兼容 base_url 已包含 /v1 的客户端）
+	r.POST("/chat/completions", auth, h.ChatCompletions)
+	r.POST("/responses", auth, h.Responses)
+	r.POST("/messages", auth, h.Messages)
+	r.GET("/models", auth, h.ListModels)
 }
 
 // authMiddleware API Key 鉴权中间件（增强版，带安全日志）
@@ -250,6 +315,19 @@ func (h *Handler) authMiddleware() gin.HandlerFunc {
 		}
 
 		authHeader := c.GetHeader("Authorization")
+		// 兼容 Anthropic 客户端的多种认证方式:
+		// - x-api-key: Anthropic SDK 默认方式
+		// - ANTHROPIC_AUTH_TOKEN: Claude Code 通过此环境变量设置，
+		//   实际发送为 Authorization: Bearer <token>（已被上面覆盖）
+		//   或 anthropic-auth-token 自定义 header
+		if authHeader == "" {
+			for _, h := range []string{"x-api-key", "anthropic-auth-token"} {
+				if v := strings.TrimSpace(c.GetHeader(h)); v != "" {
+					authHeader = "Bearer " + v
+					break
+				}
+			}
+		}
 		if authHeader == "" {
 			// Use standardized error format from api package
 			api.SendError(c, api.ErrMissingAPIKey)
@@ -260,8 +338,9 @@ func (h *Handler) authMiddleware() gin.HandlerFunc {
 		// 清理输入
 		authHeader = security.SanitizeInput(authHeader)
 
-		key := strings.TrimPrefix(authHeader, "Bearer ")
-		if !h.isValidKey(key) {
+		key := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		apiKeyRow, ok := h.resolveAPIKey(key)
+		if !ok {
 			// 记录安全审计日志（脱敏）
 			maskedKey := security.MaskAPIKey(key)
 			security.SecurityAuditLog("AUTH_FAILED", fmt.Sprintf("path=%s ip=%s key=%s", c.Request.URL.Path, c.ClientIP(), maskedKey))
@@ -270,6 +349,10 @@ func (h *Handler) authMiddleware() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		c.Set(contextAPIKeyID, apiKeyRow.ID)
+		c.Set(contextAPIKeyName, strings.TrimSpace(apiKeyRow.Name))
+		c.Set(contextAPIKeyMasked, security.MaskAPIKey(apiKeyRow.Key))
+		c.Set("apiKey", key)
 		c.Next()
 	}
 }
@@ -350,7 +433,7 @@ func (h *Handler) Responses(c *gin.Context) {
 
 	rawBody = normalizeServiceTierField(rawBody)
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
-	sessionID := ResolveSessionID(c.GetHeader("Authorization"), rawBody)
+	sessionID := ResolveSessionID(c.Request.Header, rawBody)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -368,10 +451,10 @@ func (h *Handler) Responses(c *gin.Context) {
 	excludeAccounts := make(map[int64]bool) // 重试时排除已失败的账号
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account := h.store.NextExcluding(excludeAccounts)
+		account, stickyProxyURL := h.nextAccountForSession(sessionID, excludeAccounts)
 		if account == nil {
 			// 排队等待可用账号（最多 30s）
-			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
+			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), sessionID, 30*time.Second, excludeAccounts)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
@@ -385,7 +468,10 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 
 		start := time.Now()
-		proxyURL := h.store.NextProxy()
+		proxyURL := stickyProxyURL
+		if proxyURL == "" {
+			proxyURL = h.store.NextProxy()
+		}
 		useWebsocket := h.cfg != nil && h.cfg.UseWebsocket
 
 		// 提取 API Key 用于设备指纹稳定化
@@ -411,6 +497,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
+			h.store.UnbindSessionAffinity(sessionID, account.ID())
 			excludeAccounts[account.ID()] = true
 
 			// 不可重试的结构化错误直接返回
@@ -434,11 +521,12 @@ func (h *Handler) Responses(c *gin.Context) {
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			h.store.Release(account)
+			h.store.UnbindSessionAffinity(sessionID, account.ID())
 			excludeAccounts[account.ID()] = true
 
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, string(errBody))
 			logUpstreamError("/v1/responses", resp.StatusCode, model, account.ID(), errBody)
-			h.logUsage(&database.UsageLogInput{
+			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:        account.ID(),
 				Endpoint:         "/v1/responses",
 				Model:            model,
@@ -593,6 +681,8 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			continue
 		}
+
+		h.store.BindSessionAffinity(sessionID, account, proxyURL)
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
 			log.Printf("流异常结束 (account %d, /v1/responses, status %d): %s，已转发约 %d 字符", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)
@@ -643,7 +733,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			logInput.ReasoningTokens = usage.ReasoningTokens
 			logInput.CachedTokens = usage.CachedTokens
 		}
-		h.logUsage(logInput)
+		h.logUsageForRequest(c, logInput)
 
 		resp.Body.Close()
 		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
@@ -722,7 +812,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
-	sessionID := ResolveSessionID(c.GetHeader("Authorization"), codexBody)
+	sessionID := ResolveSessionID(c.Request.Header, codexBody)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -732,10 +822,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	excludeAccounts := make(map[int64]bool) // 重试时排除已失败的账号
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account := h.store.NextExcluding(excludeAccounts)
+		account, stickyProxyURL := h.nextAccountForSession(sessionID, excludeAccounts)
 		if account == nil {
 			// 排队等待可用账号（最多 30s）
-			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
+			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), sessionID, 30*time.Second, excludeAccounts)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
@@ -749,7 +839,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 
 		start := time.Now()
-		proxyURL := h.store.NextProxy()
+		proxyURL := stickyProxyURL
+		if proxyURL == "" {
+			proxyURL = h.store.NextProxy()
+		}
 		useWebsocket := h.cfg != nil && h.cfg.UseWebsocket
 
 		// 提取 API Key 用于设备指纹稳定化
@@ -775,6 +868,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
+			h.store.UnbindSessionAffinity(sessionID, account.ID())
 			excludeAccounts[account.ID()] = true
 
 			// 不可重试的结构化错误直接返回
@@ -798,11 +892,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			h.store.Release(account)
+			h.store.UnbindSessionAffinity(sessionID, account.ID())
 			excludeAccounts[account.ID()] = true
 
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, string(errBody))
 			logUpstreamError("/v1/chat/completions", resp.StatusCode, model, account.ID(), errBody)
-			h.logUsage(&database.UsageLogInput{
+			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:        account.ID(),
 				Endpoint:         "/v1/chat/completions",
 				Model:            model,
@@ -962,6 +1057,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			}
 			continue
 		}
+
+		h.store.BindSessionAffinity(sessionID, account, proxyURL)
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
 			log.Printf("流异常结束 (account %d, /v1/chat/completions, status %d): %s，已转发约 %d 字符", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)
@@ -1012,7 +1109,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			logInput.ReasoningTokens = usage.ReasoningTokens
 			logInput.CachedTokens = usage.CachedTokens
 		}
-		h.logUsage(logInput)
+		h.logUsageForRequest(c, logInput)
 
 		resp.Body.Close()
 		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {

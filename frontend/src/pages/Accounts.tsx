@@ -1,5 +1,5 @@
-import type { ChangeEvent } from 'react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import type { ChangeEvent, DragEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { api, getAdminKey } from '../api'
 import Modal from '../components/Modal'
 import PageHeader from '../components/PageHeader'
@@ -24,7 +24,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint, FolderOpen, Lock, Unlock, RotateCcw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import AccountUsageModal from '../components/AccountUsageModal'
 
@@ -32,7 +32,7 @@ export default function Accounts() {
   const { t } = useTranslation()
   const [showAdd, setShowAdd] = useState(false)
   const [page, setPage] = useState(1)
-  const [statusFilter, setStatusFilter] = useState<'all' | 'normal' | 'rate_limited' | 'banned'>('all')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'normal' | 'rate_limited' | 'banned' | 'locked'>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [planFilter, setPlanFilter] = useState<'all' | 'pro' | 'team' | 'free'>('all')
   const [sortKey, setSortKey] = useState<'requests' | 'usage' | 'importTime' | null>(null)
@@ -55,6 +55,8 @@ export default function Accounts() {
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null)
   const [importing, setImporting] = useState(false)
   const [showImportPicker, setShowImportPicker] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  const dragCounter = useRef(0)
   const [showExportPicker, setShowExportPicker] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [showMigrate, setShowMigrate] = useState(false)
@@ -77,6 +79,7 @@ export default function Accounts() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const jsonInputRef = useRef<HTMLInputElement>(null)
   const atFileInputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
   const { toast, showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
 
@@ -109,8 +112,9 @@ export default function Accounts() {
 
   const totalAccounts = accounts.length
   const normalAccounts = accounts.filter((account) => account.status === 'active' || account.status === 'ready').length
-  const rateLimitedAccounts = accounts.filter((account) => account.status === 'rate_limited').length
+  const rateLimitedAccounts = accounts.filter((account) => account.status === 'rate_limited' || account.status === 'usage_exhausted').length
   const bannedAccounts = accounts.filter((account) => account.status === 'unauthorized').length
+  const lockedAccounts = accounts.filter((account) => account.locked).length
   const healthyAccounts = accounts.filter((account) => account.health_tier === 'healthy').length
   const warmAccounts = accounts.filter((account) => account.health_tier === 'warm').length
   const riskyAccounts = accounts.filter((account) => account.health_tier === 'risky').length
@@ -122,10 +126,13 @@ export default function Accounts() {
         if (account.status !== 'active' && account.status !== 'ready') return false
         break
       case 'rate_limited':
-        if (account.status !== 'rate_limited') return false
+        if (account.status !== 'rate_limited' && account.status !== 'usage_exhausted') return false
         break
       case 'banned':
         if (account.status !== 'unauthorized') return false
+        break
+      case 'locked':
+        if (!account.locked) return false
         break
     }
     // 套餐过滤
@@ -296,6 +303,143 @@ export default function Accounts() {
     }
   }
 
+  const importFiles = async (files: File[], format: 'txt' | 'json' | 'at_txt') => {
+    setImporting(true)
+    try {
+      const formData = new FormData()
+      if (format !== 'txt') formData.append('format', format)
+      for (const f of files) formData.append('file', f)
+      const res = await fetch('/api/admin/accounts/import', { method: 'POST', body: formData, headers: getAdminKey() ? { 'X-Admin-Key': getAdminKey() } : {} })
+      if (res.headers.get('content-type')?.includes('text/event-stream')) {
+        await readImportSSE(res)
+      } else {
+        const data = await res.json()
+        if (!res.ok) {
+          showToast(data.error ? t('accounts.importFailedWithReason', { error: data.error }) : t('accounts.importFailed'), 'error')
+        } else {
+          showToast(t('accounts.importCompleted'))
+          void reload()
+        }
+      }
+    } catch (error) {
+      showToast(t('accounts.importFailedWithReason', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const handleDragEnter = (e: DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current++
+    if (dragCounter.current === 1) setDragging(true)
+  }
+
+  const handleDragOver = (e: DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+  }
+
+  const handleDragLeave = (e: DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current--
+    if (dragCounter.current === 0) setDragging(false)
+  }
+
+  const readAllEntriesFromDirectory = (dirEntry: FileSystemDirectoryEntry): Promise<File[]> => {
+    return new Promise((resolve) => {
+      const files: File[] = []
+      const readEntries = (reader: FileSystemDirectoryReader) => {
+        reader.readEntries(async (entries) => {
+          if (entries.length === 0) { resolve(files); return }
+          for (const entry of entries) {
+            if (entry.isFile) {
+              const file = await new Promise<File>((res) => (entry as FileSystemFileEntry).file(res))
+              files.push(file)
+            } else if (entry.isDirectory) {
+              const subFiles = await readAllEntriesFromDirectory(entry as FileSystemDirectoryEntry)
+              files.push(...subFiles)
+            }
+          }
+          readEntries(reader)
+        })
+      }
+      readEntries(dirEntry.createReader())
+    })
+  }
+
+  const handleDrop = async (e: DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current = 0
+    setDragging(false)
+    if (importing) return
+
+    // 检测是否拖入了文件夹
+    const items = e.dataTransfer.items
+    const hasDirectories = items && Array.from(items).some(
+      item => item.webkitGetAsEntry?.()?.isDirectory
+    )
+
+    if (hasDirectories) {
+      const allFiles: File[] = []
+      for (const item of Array.from(items)) {
+        const entry = item.webkitGetAsEntry?.()
+        if (!entry) continue
+        if (entry.isDirectory) {
+          const dirFiles = await readAllEntriesFromDirectory(entry as FileSystemDirectoryEntry)
+          allFiles.push(...dirFiles)
+        } else if (entry.isFile) {
+          const file = await new Promise<File>((res) => (entry as FileSystemFileEntry).file(res))
+          allFiles.push(file)
+        }
+      }
+
+      const validFiles = allFiles.filter(f => {
+        const ext = f.name.split('.').pop()?.toLowerCase()
+        return (ext === 'txt' || ext === 'json') && f.size > 0
+      })
+
+      if (validFiles.length === 0) {
+        showToast(t('accounts.folderNoValidFiles'), 'error')
+        return
+      }
+
+      const txtFiles = validFiles.filter(f => f.name.split('.').pop()?.toLowerCase() === 'txt')
+      const jsonFiles = validFiles.filter(f => f.name.split('.').pop()?.toLowerCase() === 'json')
+
+      if (jsonFiles.length > 0) {
+        await importFiles([...jsonFiles, ...txtFiles], 'json')
+      } else if (txtFiles.length > 0) {
+        await importFiles(txtFiles, 'txt')
+      }
+      return
+    }
+
+    // 原有的文件拖放逻辑
+    const files = Array.from(e.dataTransfer.files).filter(f => f.size > 0)
+    if (files.length === 0) return
+
+    const txtFiles: File[] = []
+    const jsonFiles: File[] = []
+    for (const f of files) {
+      const ext = f.name.split('.').pop()?.toLowerCase()
+      if (ext === 'txt') txtFiles.push(f)
+      else if (ext === 'json') jsonFiles.push(f)
+      else {
+        showToast(t('accounts.unsupportedFileType', { name: f.name }), 'error')
+        return
+      }
+    }
+
+    if (jsonFiles.length > 0) {
+      await importFiles([...jsonFiles, ...txtFiles], 'json')
+    } else if (txtFiles.length > 0) {
+      await importFiles(txtFiles, 'txt')
+    }
+  }
+
   const handleFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
@@ -303,60 +447,17 @@ export default function Accounts() {
       showToast(t('accounts.selectTxtFile'), 'error')
       return
     }
-    setImporting(true)
     setShowImportPicker(false)
-    try {
-      const formData = new FormData()
-      formData.append('file', file)
-      const res = await fetch('/api/admin/accounts/import', { method: 'POST', body: formData, headers: getAdminKey() ? { 'X-Admin-Key': getAdminKey() } : {} })
-      if (res.headers.get('content-type')?.includes('text/event-stream')) {
-        await readImportSSE(res)
-      } else {
-        const data = await res.json()
-        if (!res.ok) {
-          showToast(data.error ? t('accounts.importFailedWithReason', { error: data.error }) : t('accounts.importFailed'), 'error')
-        } else {
-          showToast(t('accounts.importCompleted'))
-          void reload()
-        }
-      }
-    } catch (error) {
-      showToast(t('accounts.importFailedWithReason', { error: getErrorMessage(error) }), 'error')
-    } finally {
-      setImporting(false)
-      if (fileInputRef.current) fileInputRef.current.value = ''
-    }
+    await importFiles([file], 'txt')
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const handleJsonImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files
     if (!files || files.length === 0) return
-    setImporting(true)
     setShowImportPicker(false)
-    try {
-      const formData = new FormData()
-      formData.append('format', 'json')
-      for (let i = 0; i < files.length; i++) {
-        formData.append('file', files[i])
-      }
-      const res = await fetch('/api/admin/accounts/import', { method: 'POST', body: formData, headers: getAdminKey() ? { 'X-Admin-Key': getAdminKey() } : {} })
-      if (res.headers.get('content-type')?.includes('text/event-stream')) {
-        await readImportSSE(res)
-      } else {
-        const data = await res.json()
-        if (!res.ok) {
-          showToast(data.error ? t('accounts.importFailedWithReason', { error: data.error }) : t('accounts.importFailed'), 'error')
-        } else {
-          showToast(t('accounts.importCompleted'))
-          void reload()
-        }
-      }
-    } catch (error) {
-      showToast(t('accounts.importFailedWithReason', { error: getErrorMessage(error) }), 'error')
-    } finally {
-      setImporting(false)
-      if (jsonInputRef.current) jsonInputRef.current.value = ''
-    }
+    await importFiles(Array.from(files), 'json')
+    if (jsonInputRef.current) jsonInputRef.current.value = ''
   }
 
   const handleAtFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -366,30 +467,37 @@ export default function Accounts() {
       showToast(t('accounts.selectTxtFile'), 'error')
       return
     }
-    setImporting(true)
     setShowImportPicker(false)
-    try {
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('format', 'at_txt')
-      const res = await fetch('/api/admin/accounts/import', { method: 'POST', body: formData, headers: getAdminKey() ? { 'X-Admin-Key': getAdminKey() } : {} })
-      if (res.headers.get('content-type')?.includes('text/event-stream')) {
-        await readImportSSE(res)
-      } else {
-        const data = await res.json()
-        if (!res.ok) {
-          showToast(data.error ? t('accounts.importFailedWithReason', { error: data.error }) : t('accounts.importFailed'), 'error')
-        } else {
-          showToast(t('accounts.importCompleted'))
-          void reload()
-        }
-      }
-    } catch (error) {
-      showToast(t('accounts.importFailedWithReason', { error: getErrorMessage(error) }), 'error')
-    } finally {
-      setImporting(false)
-      if (atFileInputRef.current) atFileInputRef.current.value = ''
+    await importFiles([file], 'at_txt')
+    if (atFileInputRef.current) atFileInputRef.current.value = ''
+  }
+
+  const handleFolderImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files
+    if (!files || files.length === 0) return
+    setShowImportPicker(false)
+
+    const validFiles = Array.from(files).filter(f => {
+      const ext = f.name.split('.').pop()?.toLowerCase()
+      return (ext === 'txt' || ext === 'json') && f.size > 0
+    })
+
+    if (validFiles.length === 0) {
+      showToast(t('accounts.folderNoValidFiles'), 'error')
+      if (folderInputRef.current) folderInputRef.current.value = ''
+      return
     }
+
+    const txtFiles = validFiles.filter(f => f.name.split('.').pop()?.toLowerCase() === 'txt')
+    const jsonFiles = validFiles.filter(f => f.name.split('.').pop()?.toLowerCase() === 'json')
+
+    if (jsonFiles.length > 0) {
+      await importFiles([...jsonFiles, ...txtFiles], 'json')
+    } else if (txtFiles.length > 0) {
+      await importFiles(txtFiles, 'txt')
+    }
+
+    if (folderInputRef.current) folderInputRef.current.value = ''
   }
 
   const handleExport = async (format: 'json' | 'txt', scope: 'healthy' | 'selected') => {
@@ -489,6 +597,17 @@ export default function Accounts() {
     }
   }
 
+  const handleToggleLock = async (account: AccountRow) => {
+    const newLocked = !account.locked
+    try {
+      await api.toggleAccountLock(account.id, newLocked)
+      showToast(newLocked ? t('accounts.lockSuccess') : t('accounts.unlockSuccess'))
+      void reload()
+    } catch (error) {
+      showToast(t('accounts.lockFailed', { error: getErrorMessage(error) }), 'error')
+    }
+  }
+
   const handleBatchDelete = async () => {
     if (selected.size === 0) return
     const confirmed = await confirm({
@@ -532,6 +651,50 @@ export default function Accounts() {
     showToast(t('accounts.batchRefreshDone', { success, fail }))
     setBatchLoading(false)
     void reload()
+  }
+
+  const handleBatchLock = async (locked: boolean) => {
+    if (selected.size === 0) return
+    setBatchLoading(true)
+    let success = 0
+    let fail = 0
+    for (const id of selected) {
+      try {
+        await api.toggleAccountLock(id, locked)
+        success++
+      } catch {
+        fail++
+      }
+    }
+    showToast(t(locked ? 'accounts.batchLockDone' : 'accounts.batchUnlockDone', { success, fail }))
+    setBatchLoading(false)
+    setSelected(new Set())
+    void reload()
+  }
+
+  const handleResetStatus = async (account: AccountRow) => {
+    try {
+      await api.resetAccountStatus(account.id)
+      showToast(t('accounts.resetStatusSuccess'))
+      void reload()
+    } catch (error) {
+      showToast(t('accounts.resetStatusFailed', { error: getErrorMessage(error) }), 'error')
+    }
+  }
+
+  const handleBatchResetStatus = async () => {
+    if (selected.size === 0) return
+    setBatchLoading(true)
+    try {
+      const result = await api.batchResetStatus(Array.from(selected))
+      showToast(t('accounts.batchResetStatusDone', { success: result.success, fail: result.failed }))
+      setSelected(new Set())
+      void reload()
+    } catch (error) {
+      showToast(t('accounts.resetStatusFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setBatchLoading(false)
+    }
   }
 
   const handleBatchTest = async () => {
@@ -613,6 +776,22 @@ export default function Accounts() {
   }
 
   return (
+    <div
+      className="relative"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={(e) => void handleDrop(e)}
+    >
+      {dragging && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-primary/5 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-2 text-primary">
+            <Upload className="size-10" />
+            <span className="text-lg font-semibold">{t('accounts.dropToImport')}</span>
+            <span className="text-sm text-muted-foreground">{t('accounts.dropHint')}</span>
+          </div>
+        </div>
+      )}
     <StateShell
       variant="page"
       loading={loading}
@@ -683,6 +862,13 @@ export default function Accounts() {
                 className="hidden"
                 onChange={(e) => void handleAtFileImport(e)}
               />
+              <input
+                ref={folderInputRef}
+                type="file"
+                className="hidden"
+                onChange={(e) => void handleFolderImport(e)}
+                {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
+              />
             </div>
           )}
         />
@@ -696,7 +882,7 @@ export default function Accounts() {
 
         <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-border bg-white/55 px-4 py-3 text-[12px] text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]">
           <span className="font-semibold text-foreground">{t('accounts.filter')}</span>
-          {([['all', t('accounts.filterAll')], ['normal', t('accounts.filterNormal')], ['rate_limited', t('accounts.filterRateLimited')], ['banned', t('accounts.filterBanned')]] as const).map(([key, label]) => (
+          {([['all', t('accounts.filterAll')], ['normal', t('accounts.filterNormal')], ['rate_limited', t('accounts.filterRateLimited')], ['banned', t('accounts.filterBanned')], ['locked', t('accounts.filterLocked')]] as const).map(([key, label]) => (
             <button
               key={key}
               onClick={() => { setStatusFilter(key); setPage(1) }}
@@ -706,7 +892,7 @@ export default function Accounts() {
                   : 'bg-muted/50 text-muted-foreground hover:bg-muted'
               }`}
             >
-              {label} {key === 'all' ? totalAccounts : key === 'normal' ? normalAccounts : key === 'rate_limited' ? rateLimitedAccounts : bannedAccounts}
+              {label} {key === 'all' ? totalAccounts : key === 'normal' ? normalAccounts : key === 'rate_limited' ? rateLimitedAccounts : key === 'banned' ? bannedAccounts : lockedAccounts}
             </button>
           ))}
         </div>
@@ -752,6 +938,15 @@ export default function Accounts() {
             <div className="flex items-center gap-1.5">
               <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchRefresh()}>
                 {t('accounts.batchRefresh')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchLock(true)}>
+                <Lock className="size-3 mr-1" />{t('accounts.lock')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchLock(false)}>
+                <Unlock className="size-3 mr-1" />{t('accounts.unlock')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchResetStatus()}>
+                <RotateCcw className="size-3 mr-1" />{t('accounts.batchResetStatus')}
               </Button>
               <Button variant="destructive" size="sm" disabled={batchLoading} onClick={() => void handleBatchDelete()}>
                 {t('accounts.batchDelete')}
@@ -829,6 +1024,11 @@ export default function Accounts() {
                               AT
                             </span>
                           )}
+                          {account.locked && (
+                            <span className="ml-1.5 inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20">
+                              <Lock className="size-2.5 mr-0.5" />{t('accounts.lock')}
+                            </span>
+                          )}
                         </TableCell>
                         <TableCell
                           className="text-[13px] font-medium"
@@ -838,6 +1038,9 @@ export default function Accounts() {
                         <TableCell>
                           <div className="space-y-1">
                             <StatusBadge status={account.status} />
+                            {account.cooldown_until && (account.status === 'rate_limited' || account.status === 'error') && (
+                              <CooldownTimer until={account.cooldown_until} />
+                            )}
                             <div className="text-[11px] text-muted-foreground">
                               {t('accounts.healthSummary', {
                                 health: formatHealthTier(account.health_tier, t),
@@ -888,6 +1091,24 @@ export default function Accounts() {
                               title={account.at_only ? t('accounts.atRefreshDisabled') : t('accounts.refreshAccessToken')}
                             >
                               <RefreshCw className={`size-3.5 ${refreshingIds.has(account.id) ? 'animate-spin' : ''}`} />
+                            </Button>
+                            <Button
+                              variant={account.locked ? 'default' : 'outline'}
+                              size="icon"
+                              className="h-7 w-8 px-0"
+                              onClick={() => void handleToggleLock(account)}
+                              title={account.locked ? t('accounts.unlockHint') : t('accounts.lockHint')}
+                            >
+                              {account.locked ? <Lock className="size-3.5" /> : <Unlock className="size-3.5" />}
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="h-7 w-8 px-0"
+                              onClick={() => void handleResetStatus(account)}
+                              title={t('accounts.resetStatusHint')}
+                            >
+                              <RotateCcw className="size-3.5" />
                             </Button>
                             <Button
                               variant="destructive"
@@ -1128,7 +1349,7 @@ export default function Accounts() {
           contentClassName="sm:max-w-[640px]"
           onClose={() => setShowImportPicker(false)}
         >
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 gap-3">
             <button
               className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors"
               onClick={() => {
@@ -1168,6 +1389,19 @@ export default function Accounts() {
                 <div className="text-[11px] text-muted-foreground">{t('accounts.importAtTxtDesc')}</div>
               </div>
             </button>
+            <button
+              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors"
+              onClick={() => {
+                setShowImportPicker(false)
+                folderInputRef.current?.click()
+              }}
+            >
+              <FolderOpen className="size-5 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-sm font-medium">{t('accounts.importFolder')}</div>
+                <div className="text-[11px] text-muted-foreground">{t('accounts.importFolderDesc')}</div>
+              </div>
+            </button>
           </div>
         </Modal>
 
@@ -1177,49 +1411,61 @@ export default function Accounts() {
           contentClassName="sm:max-w-[580px]"
           onClose={() => setShowExportPicker(false)}
         >
-          <div className="grid grid-cols-2 gap-3">
-            <button
-              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3.5 text-left hover:bg-muted/50 transition-colors"
-              onClick={() => void handleExport('json', 'healthy')}
-            >
-              <FileJson className="size-5 shrink-0 text-muted-foreground" />
-              <div className="min-w-0">
-                <div className="text-sm font-medium whitespace-nowrap">{t('accounts.exportHealthyJson')}</div>
-                <div className="text-[11px] text-muted-foreground">{t('accounts.exportHealthyJsonDesc')}</div>
+          <div className="space-y-4">
+            {/* 健康账号导出 */}
+            <div>
+              <div className="text-xs font-semibold text-muted-foreground mb-2">{t('accounts.exportScopeHealthy')}</div>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors"
+                  onClick={() => void handleExport('json', 'healthy')}
+                >
+                  <FileJson className="size-5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">CPA JSON</div>
+                    <div className="text-[11px] text-muted-foreground">{t('accounts.exportHealthyJsonDesc')}</div>
+                  </div>
+                </button>
+                <button
+                  className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors"
+                  onClick={() => void handleExport('txt', 'healthy')}
+                >
+                  <FileText className="size-5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">TXT</div>
+                    <div className="text-[11px] text-muted-foreground">{t('accounts.exportHealthyTxtDesc')}</div>
+                  </div>
+                </button>
               </div>
-            </button>
-            <button
-              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3.5 text-left hover:bg-muted/50 transition-colors"
-              onClick={() => void handleExport('txt', 'healthy')}
-            >
-              <FileText className="size-5 shrink-0 text-muted-foreground" />
-              <div className="min-w-0">
-                <div className="text-sm font-medium whitespace-nowrap">{t('accounts.exportHealthyTxt')}</div>
-                <div className="text-[11px] text-muted-foreground">{t('accounts.exportHealthyTxtDesc')}</div>
+            </div>
+            {/* 已选账号导出 */}
+            <div>
+              <div className="text-xs font-semibold text-muted-foreground mb-2">{t('accounts.exportScopeSelected', { count: selected.size })}</div>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                  disabled={selected.size === 0}
+                  onClick={() => void handleExport('json', 'selected')}
+                >
+                  <FileJson className="size-5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">CPA JSON</div>
+                    <div className="text-[11px] text-muted-foreground">{t('accounts.exportSelectedJsonDesc')}</div>
+                  </div>
+                </button>
+                <button
+                  className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                  disabled={selected.size === 0}
+                  onClick={() => void handleExport('txt', 'selected')}
+                >
+                  <FileText className="size-5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">TXT</div>
+                    <div className="text-[11px] text-muted-foreground">{t('accounts.exportSelectedTxtDesc')}</div>
+                  </div>
+                </button>
               </div>
-            </button>
-            <button
-              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3.5 text-left hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
-              disabled={selected.size === 0}
-              onClick={() => void handleExport('json', 'selected')}
-            >
-              <FileJson className="size-5 shrink-0 text-muted-foreground" />
-              <div className="min-w-0">
-                <div className="text-sm font-medium whitespace-nowrap">{t('accounts.exportSelectedJson')}</div>
-                <div className="text-[11px] text-muted-foreground">{t('accounts.exportSelectedJsonDesc')}</div>
-              </div>
-            </button>
-            <button
-              className="flex items-center gap-3 rounded-xl border border-border px-4 py-3.5 text-left hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
-              disabled={selected.size === 0}
-              onClick={() => void handleExport('txt', 'selected')}
-            >
-              <FileText className="size-5 shrink-0 text-muted-foreground" />
-              <div className="min-w-0">
-                <div className="text-sm font-medium whitespace-nowrap">{t('accounts.exportSelectedTxt')}</div>
-                <div className="text-[11px] text-muted-foreground">{t('accounts.exportSelectedTxtDesc')}</div>
-              </div>
-            </button>
+            </div>
           </div>
         </Modal>
 
@@ -1321,6 +1567,7 @@ export default function Accounts() {
         <ToastNotice toast={toast} />
       </>
     </StateShell>
+    </div>
   )
 }
 
@@ -1679,6 +1926,13 @@ function TestConnectionModal({
             </pre>
           </div>
         )}
+
+        {status === 'success' && (
+          <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-400">
+            <RotateCcw className="size-4 shrink-0" />
+            {t('accounts.testAutoReset')}
+          </div>
+        )}
       </div>
     </Modal>
   )
@@ -1732,7 +1986,7 @@ function UsageCell({ account }: { account: AccountRow }) {
     )
   }
 
-  if (plan === 'pro' || plan === 'team') {
+  if (plan === 'pro' || plan === 'team' || plan === 'plus' || plan === 'teamplus') {
     if (!has5h && !has7d) return <span className="text-[12px] text-muted-foreground">-</span>
     return (
       <div className="w-48 space-y-1.5">
@@ -1750,4 +2004,38 @@ function UsageCell({ account }: { account: AccountRow }) {
     )
   }
   return <span className="text-[13px] text-muted-foreground">-</span>
+}
+
+// 冷却倒计时组件
+function CooldownTimer({ until }: { until: string }) {
+  const [remaining, setRemaining] = useState('')
+
+  useEffect(() => {
+    const target = new Date(until).getTime()
+
+    const update = () => {
+      const diff = Math.max(0, target - Date.now())
+      if (diff <= 0) {
+        setRemaining('')
+        return
+      }
+      const h = Math.floor(diff / 3600000)
+      const m = Math.floor((diff % 3600000) / 60000)
+      const s = Math.floor((diff % 60000) / 1000)
+      if (h > 0) {
+        setRemaining(`${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`)
+      } else if (m > 0) {
+        setRemaining(`${m}m ${String(s).padStart(2, '0')}s`)
+      } else {
+        setRemaining(`${s}s`)
+      }
+    }
+
+    update()
+    const id = setInterval(update, 1000)
+    return () => clearInterval(id)
+  }, [until])
+
+  if (!remaining) return null
+  return <span className="text-[11px] font-mono text-amber-600">⏳ {remaining}</span>
 }

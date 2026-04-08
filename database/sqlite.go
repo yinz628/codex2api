@@ -11,7 +11,7 @@ import (
 func (db *DB) configureSQLite(ctx context.Context) error {
 	pragmas := []string{
 		`PRAGMA journal_mode=WAL;`,
-		`PRAGMA busy_timeout=5000;`,
+		`PRAGMA busy_timeout=15000;`,
 		`PRAGMA synchronous=NORMAL;`,
 	}
 	for _, pragma := range pragmas {
@@ -58,7 +58,10 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			upstream_endpoint TEXT DEFAULT '',
 			stream INTEGER DEFAULT 0,
 			cached_tokens INTEGER DEFAULT 0,
-			service_tier TEXT DEFAULT ''
+			service_tier TEXT DEFAULT '',
+			api_key_id INTEGER DEFAULT 0,
+			api_key_name TEXT DEFAULT '',
+			api_key_masked TEXT DEFAULT ''
 		);`,
 		`CREATE TABLE IF NOT EXISTS api_keys (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,6 +133,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"usage_logs", "stream", "INTEGER DEFAULT 0"},
 		{"usage_logs", "cached_tokens", "INTEGER DEFAULT 0"},
 		{"usage_logs", "service_tier", "TEXT DEFAULT ''"},
+		{"usage_logs", "api_key_id", "INTEGER DEFAULT 0"},
+		{"usage_logs", "api_key_name", "TEXT DEFAULT ''"},
+		{"usage_logs", "api_key_masked", "TEXT DEFAULT ''"},
 		{"system_settings", "pg_max_conns", "INTEGER DEFAULT 50"},
 		{"system_settings", "redis_pool_size", "INTEGER DEFAULT 30"},
 		{"system_settings", "auto_clean_unauthorized", "INTEGER DEFAULT 0"},
@@ -142,12 +148,15 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "fast_scheduler_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "max_retries", "INTEGER DEFAULT 2"},
 		{"system_settings", "allow_remote_migration", "INTEGER DEFAULT 0"},
+		{"system_settings", "model_mapping", "TEXT DEFAULT '{}'"},
+		{"accounts", "locked", "INTEGER DEFAULT 0"},
 		{"proxies", "test_ip", "TEXT DEFAULT ''"},
 		{"proxies", "test_location", "TEXT DEFAULT ''"},
 		{"proxies", "test_country", "TEXT DEFAULT ''"},
 		{"proxies", "test_latency_ms", "INTEGER DEFAULT 0"},
 		{"proxies", "quality_status", "TEXT DEFAULT ''"},
 		{"proxies", "quality_status_code", "INTEGER DEFAULT 0"},
+		{"account_events", "source", "TEXT DEFAULT ''"},
 	}
 	for _, column := range columns {
 		if err := db.ensureSQLiteColumn(ctx, column.table, column.name, column.def); err != nil {
@@ -163,6 +172,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_account_id ON usage_logs(account_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_created_status ON usage_logs(created_at, status_code);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_account_status ON usage_logs(account_id, status_code);`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_logs_api_key_created_at ON usage_logs(api_key_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_account_events_created ON account_events(created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_account_events_type_created ON account_events(event_type, created_at);`,
 	}
@@ -405,7 +415,8 @@ func (db *DB) getAccountEventTrendSQLite(ctx context.Context, start, end time.Ti
 	}
 
 	query := fmt.Sprintf(
-		`SELECT created_at, event_type FROM account_events WHERE %s`,
+		`SELECT created_at, event_type, COALESCE(source, '') FROM account_events WHERE %s
+		  AND (event_type = 'added' OR (event_type = 'deleted' AND COALESCE(source, '') = 'manual'))`,
 		db.timeRangeCondition("created_at", "$1", "$2"),
 	)
 	rows, err := db.conn.QueryContext(ctx, query, db.normalizeQueryTime(start), db.normalizeQueryTime(end))
@@ -422,8 +433,8 @@ func (db *DB) getAccountEventTrendSQLite(ctx context.Context, start, end time.Ti
 
 	for rows.Next() {
 		var createdRaw interface{}
-		var eventType string
-		if err := rows.Scan(&createdRaw, &eventType); err != nil {
+		var eventType, source string
+		if err := rows.Scan(&createdRaw, &eventType, &source); err != nil {
 			return nil, err
 		}
 		createdAt, err := parseDBTimeValue(createdRaw)

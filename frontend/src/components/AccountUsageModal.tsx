@@ -90,7 +90,7 @@ export default function AccountUsageModal({ account, onClose }: Props) {
                     ))}
                   </Pie>
                   <Tooltip
-                    formatter={(value, name) => [`${formatTooltipValue(value)} 次`, name ?? '']}
+                    formatter={(value, name) => [`${formatTooltipValue(value)} 次`, String(name ?? '')]}
                     contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid hsl(var(--border))' }}
                   />
                 </PieChart>
